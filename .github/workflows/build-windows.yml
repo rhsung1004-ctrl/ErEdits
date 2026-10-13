@@ -1,0 +1,162 @@
+# ERKillCut Windows 실행 파일 자동 빌드
+#
+# GitHub에 올리면 GitHub의 Windows 서버에서
+#   1) Qt 6를 설치해서 ERKillCut 을 빌드하고 (약 5~10분)
+#   2) 실행에 필요한 파일(Qt DLL, ffmpeg.exe, VC++ 런타임)을 모아
+#   3) ERKillCut-windows-x64.zip 으로 묶어 줍니다.
+# 결과물: Actions 탭 → 실행 기록 → 아래쪽 "Artifacts" 에서 다운로드
+#        (main 브랜치에 올리면 Releases 에도 자동 게시)
+
+name: Windows 빌드
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  QT_VERSION: '6.8.3'
+
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: 소스 가져오기
+        uses: actions/checkout@v4
+        with:
+          path: app
+
+      - name: Qt 설치
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2022_64
+          modules: qtmultimedia
+          cache: true
+
+      - name: ERKillCut 빌드
+        run: |
+          cmake -S app -B build -A x64 -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+          cmake --build build --config Release --parallel 2>&1 | Tee-Object -FilePath build.log
+          $code = $LASTEXITCODE
+          Select-String -Path build.log -Pattern ': (fatal )?error |error C\d+|error LNK|CMake Error' |
+            Select-Object -First 25 | ForEach-Object { Write-Output ("::error title=컴파일 오류::" + $_.Line.Trim()) }
+          if ($code -ne 0) { exit $code }
+
+      - name: 실행 파일 패키징
+        run: |
+          $dist = "${{ github.workspace }}/ERKillCut"
+          New-Item -ItemType Directory -Force $dist | Out-Null
+          Copy-Item "build/Release/ERKillCut.exe" $dist -Force
+
+          # Qt 런타임 (미리보기 재생은 Qt 의 FFmpeg 백엔드 → mkv/ts/flv 다시보기도 재생)
+          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-translations --no-opengl-sw "$dist/ERKillCut.exe"
+          if ($LASTEXITCODE -ne 0) { throw "windeployqt 실패" }
+
+          # ffmpeg.exe (킬 분석, 영상 내보내기)
+          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
+          Copy-Item (Get-ChildItem ffmpeg-tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName $dist
+
+          # Visual C++ 런타임 DLL (PC에 설치돼 있지 않아도 실행되도록)
+          $crt = Get-ChildItem "C:/Program Files/Microsoft Visual Studio" -Recurse -Filter vcruntime140.dll -ErrorAction SilentlyContinue |
+                 Where-Object FullName -match 'Redist\\MSVC\\[^\\]+\\x64\\Microsoft\.VC\d+\.CRT' |
+                 Sort-Object FullName -Descending | Select-Object -First 1
+          if ($crt) { Copy-Item "$($crt.DirectoryName)/*.dll" $dist -Force } else { Write-Warning "VC++ 런타임을 찾지 못했습니다" }
+
+          # 안내 / 라이선스
+          Copy-Item "app/README.md" "$dist/README.md"
+          Copy-Item "app/LICENSE" "$dist/LICENSE.txt"
+          Copy-Item "app/THIRD_PARTY_NOTICES.txt" "$dist/THIRD_PARTY_NOTICES.txt"
+          Copy-Item "app/licenses" "$dist/licenses" -Recurse
+          @"
+          ERKillCut 실행 방법
+          ===================
+          1. 이 폴더 전체를 원하는 곳에 압축 해제하세요.
+          2. ERKillCut.exe 를 더블클릭하면 실행됩니다. (영상 파일을 exe 위에 끌어 놓아도 열려요)
+          3. 처음 실행할 때 Windows가 '알 수 없는 게시자' 경고를 띄우면
+             '추가 정보' → '실행' 을 누르세요 (코드 서명이 없는 개인 빌드라서 나오는 경고입니다).
+
+          사용 순서
+          ---------
+          방송 다시보기 열기 → 영역 지정(처음 한 번, 스트리머별 프리셋 저장) → 킬 찾기 시작
+          → 클립 확인·조정 → 영상 내보내기 (크로스페이드 / 처음 페이드 인 / 끝 페이드 아웃)
+
+          안내
+          ----
+          - ERKillCut은 이터널리턴 및 님블뉴런과 관련 없는 비공식 팬 제작 도구입니다.
+          - 영상 화면만 분석하며 어떤 정보도 외부로 보내지 않습니다.
+          - 보증 없이 "있는 그대로" 제공됩니다.
+          - 라이선스: GNU GPL v3 (LICENSE.txt), 포함 구성요소 고지: THIRD_PARTY_NOTICES.txt
+          "@ | Out-File "$dist/실행방법.txt" -Encoding utf8
+
+          Get-ChildItem $dist | Format-Table Name, Length
+
+      - name: 필수 파일 확인
+        run: |
+          $dist = "${{ github.workspace }}/ERKillCut"
+          $required = @('ERKillCut.exe', 'ffmpeg.exe', 'Qt6Core.dll', 'Qt6Widgets.dll', 'Qt6Multimedia.dll',
+                        'Qt6MultimediaWidgets.dll', 'platforms/qwindows.dll', 'vcruntime140.dll', 'msvcp140.dll',
+                        'LICENSE.txt', 'THIRD_PARTY_NOTICES.txt')
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $dist $_)) }
+          $mm = (Get-ChildItem "$dist/multimedia" -ErrorAction SilentlyContinue | ForEach-Object Name) -join ', '
+          Write-Output "::notice title=패키지 확인::필수 파일 $($required.Count - $missing.Count)/$($required.Count) | 미디어 백엔드: $mm"
+          if ($missing) {
+            Write-Output "::error title=누락된 파일::$($missing -join ', ')"
+            throw "필수 파일 누락"
+          }
+
+      - name: 실행 테스트 (10초 동안 켜 두기)
+        continue-on-error: true
+        run: |
+          $p = Start-Process "${{ github.workspace }}/ERKillCut/ERKillCut.exe" -PassThru
+          Start-Sleep 10
+          if ($p.HasExited) { Write-Output "::error title=실행 테스트::$($p.ExitCode) 코드로 바로 종료됨"; exit 1 }
+          Stop-Process -Id $p.Id -Force
+          Write-Output "::notice title=실행 테스트::10초 동안 정상 실행"
+
+      - name: 압축
+        run: Compress-Archive -Path "${{ github.workspace }}/ERKillCut" -DestinationPath ERKillCut-windows-x64.zip
+
+      - name: 결과물 업로드 (Actions → Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ERKillCut-windows-x64
+          path: ERKillCut-windows-x64.zip
+          retention-days: 30
+
+      # main 브랜치에 올라온 빌드는 Releases 에 자동 게시
+      # 항상 최신 버전 링크: https://github.com/<저장소>/releases/latest/download/ERKillCut-windows-x64.zip
+      - name: 릴리스에 자동 게시
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
+          name: ERKillCut v0.1.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          files: ERKillCut-windows-x64.zip
+          body: |
+            ## 다운로드
+            아래 **ERKillCut-windows-x64.zip** 을 받아 압축을 풀고 **ERKillCut.exe** 를 실행하세요.
+
+            ## 이번 변경
+            ${{ github.event.head_commit.message }}
+
+            ## 안내
+            - 이터널리턴 및 님블뉴런과 관련 없는 **비공식 팬 제작 도구**입니다.
+            - 라이선스: GNU GPL v3 · 포함 구성요소: THIRD_PARTY_NOTICES.txt
+
+      - name: 태그 버전 릴리스
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ERKillCut-windows-x64.zip
