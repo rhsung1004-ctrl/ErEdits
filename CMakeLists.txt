@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
 # Qt 6 (화면 + 미리보기 재생). 영상 분석·내보내기는 함께 넣는 ffmpeg.exe 로 처리
-find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia MultimediaWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia)
 
 add_executable(ERKillCut WIN32
   src/main.cpp
@@ -24,7 +24,7 @@ add_executable(ERKillCut WIN32
   src/SubtitlePanel.h   src/SubtitlePanel.cpp
 )
 
-target_link_libraries(ERKillCut PRIVATE Qt6::Widgets Qt6::Multimedia Qt6::MultimediaWidgets)
+target_link_libraries(ERKillCut PRIVATE Qt6::Widgets Qt6::Multimedia)
 
 if(MSVC)
   target_compile_options(ERKillCut PRIVATE /utf-8 /W3)

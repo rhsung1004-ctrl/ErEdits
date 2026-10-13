@@ -105,7 +105,7 @@ jobs:
         run: |
           $dist = "${{ github.workspace }}/ERKillCut"
           $required = @('ERKillCut.exe', 'ffmpeg.exe', 'Qt6Core.dll', 'Qt6Widgets.dll', 'Qt6Multimedia.dll',
-                        'Qt6MultimediaWidgets.dll', 'platforms/qwindows.dll', 'vcruntime140.dll', 'msvcp140.dll',
+                        'multimedia/ffmpegmediaplugin.dll', 'platforms/qwindows.dll', 'vcruntime140.dll', 'msvcp140.dll',
                         'LICENSE.txt', 'THIRD_PARTY_NOTICES.txt')
           $missing = $required | Where-Object { -not (Test-Path (Join-Path $dist $_)) }
           $mm = (Get-ChildItem "$dist/multimedia" -ErrorAction SilentlyContinue | ForEach-Object Name) -join ', '
