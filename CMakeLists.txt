@@ -18,6 +18,10 @@ add_executable(ERKillCut WIN32
   src/RoiDialog.h       src/RoiDialog.cpp
   src/TimelineBar.h     src/TimelineBar.cpp
   src/Util.h            src/Util.cpp
+  src/FontManager.h     src/FontManager.cpp
+  src/Subtitles.h       src/Subtitles.cpp
+  src/VideoView.h       src/VideoView.cpp
+  src/SubtitlePanel.h   src/SubtitlePanel.cpp
 )
 
 target_link_libraries(ERKillCut PRIVATE Qt6::Widgets Qt6::Multimedia Qt6::MultimediaWidgets)
@@ -31,7 +35,8 @@ endif()
 option(ERKILLCUT_TESTS "명령줄 테스트 도구도 빌드" OFF)
 if(ERKILLCUT_TESTS)
   add_executable(erkillcut_cli tests/cli.cpp
-    src/HudKillWatcher.cpp src/KillScanner.cpp src/Segments.cpp src/Exporter.cpp src/Util.cpp)
+    src/HudKillWatcher.cpp src/KillScanner.cpp src/Segments.cpp src/Exporter.cpp src/Util.cpp
+    src/FontManager.cpp src/Subtitles.cpp)
   target_include_directories(erkillcut_cli PRIVATE src)
-  target_link_libraries(erkillcut_cli PRIVATE Qt6::Core)
+  target_link_libraries(erkillcut_cli PRIVATE Qt6::Gui)
 endif()

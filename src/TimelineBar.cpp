@@ -38,6 +38,12 @@ void TimelineBar::setData(const QVector<Segment> &segs, const QVector<KillEvent>
 	update();
 }
 
+void TimelineBar::setSubtitles(const QVector<Subtitle> &subs)
+{
+	m_subs = subs;
+	update();
+}
+
 void TimelineBar::setSelected(int index)
 {
 	m_selected = index;
@@ -77,6 +83,11 @@ void TimelineBar::paintEvent(QPaintEvent *)
 		if (i == m_selected)
 			c = QColor(255, 220, 90);
 		p.fillRect(QRectF(x0, bar.top() + 3, x1 - x0, bar.height() - 7), c);
+	}
+	// 자막 (막대 아래쪽 보라색)
+	for (const Subtitle &sb : m_subs) {
+		const double x0 = toX(sb.start), x1 = std::max(toX(sb.end), x0 + 2);
+		p.fillRect(QRectF(x0, bar.bottom() + 1, x1 - x0, 4), QColor(170, 110, 240));
 	}
 	// 킬 표시
 	for (const KillEvent &e : m_events) {

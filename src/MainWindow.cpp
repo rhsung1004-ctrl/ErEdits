@@ -1,7 +1,9 @@
 #include "MainWindow.h"
 
 #include "RoiDialog.h"
+#include "SubtitlePanel.h"
 #include "TimelineBar.h"
+#include "VideoView.h"
 
 #include <QApplication>
 #include <QAudioOutput>
@@ -35,7 +37,7 @@
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QVBoxLayout>
-#include <QVideoWidget>
+#include <QTabWidget>
 
 #include <algorithm>
 #include <cmath>
@@ -120,10 +122,9 @@ void MainWindow::buildUi()
 	m_player = new QMediaPlayer(this);
 	m_audio = new QAudioOutput(this);
 	m_player->setAudioOutput(m_audio);
-	m_video = new QVideoWidget;
-	m_video->setMinimumSize(640, 360);
-	m_video->setStyleSheet("background:black;");
-	m_player->setVideoOutput(m_video);
+	m_view = new VideoView;
+	m_view->setMinimumSize(640, 360);
+	m_player->setVideoSink(m_view->videoSink());
 
 	auto *btnOpen = new QPushButton("📂 방송 다시보기 열기");
 	btnOpen->setStyleSheet("font-weight:bold; padding:6px 14px;");
@@ -167,7 +168,7 @@ void MainWindow::buildUi()
 	auto *left = new QWidget;
 	auto *ll = new QVBoxLayout(left);
 	ll->addLayout(top);
-	ll->addWidget(m_video, 1);
+	ll->addWidget(m_view, 1);
 	ll->addWidget(m_timeline);
 	ll->addWidget(legend);
 	ll->addLayout(ctrl);
@@ -203,7 +204,7 @@ void MainWindow::buildUi()
 	l1->addWidget(m_scanStatus);
 
 	// ── 2. 클립 ──
-	auto *g2 = new QGroupBox("2. 클립 (킬 장면만 남기기)");
+	auto *g2 = new QWidget;
 	m_before = spin(0, 60, 1, st.value("before", 10).toDouble(), " 초");
 	m_after = spin(0, 60, 1, st.value("after", 5).toDouble(), " 초");
 	m_gap = spin(0, 30, 1, st.value("gap", 3).toDouble(), " 초");
@@ -267,6 +268,7 @@ void MainWindow::buildUi()
 	m_summary = new QLabel;
 
 	auto *l2 = new QVBoxLayout(g2);
+	l2->setContentsMargins(6, 6, 6, 6);
 	l2->addLayout(pr);
 	l2->addLayout(pr2);
 	l2->addWidget(m_table, 1);
@@ -327,7 +329,11 @@ void MainWindow::buildUi()
 	auto *right = new QWidget;
 	auto *rl = new QVBoxLayout(right);
 	rl->addWidget(g1);
-	rl->addWidget(g2, 1);
+	m_subPanel = new SubtitlePanel;
+	auto *tabs = new QTabWidget;
+	tabs->addTab(g2, "2. 클립 (킬 장면만 남기기)");
+	tabs->addTab(m_subPanel, "자막");
+	rl->addWidget(tabs, 1);
 	rl->addWidget(g3);
 	right->setMinimumWidth(520);
 
@@ -431,6 +437,8 @@ void MainWindow::buildUi()
 	connect(m_player, &QMediaPlayer::positionChanged, this, [this](qint64 ms) {
 		const double t = ms / 1000.0;
 		m_timeline->setPosition(t);
+		m_view->setTime(t);
+		m_subPanel->setPlayhead(t);
 		m_posLabel->setText(formatTime(t) + " / " + formatTime(m_info.duration, false));
 		if (m_playEnd >= 0 && t >= m_playEnd) {
 			m_player->pause();
@@ -442,6 +450,46 @@ void MainWindow::buildUi()
 		m_player->setPosition(qint64(t * 1000));
 	});
 	connect(m_timeline, &TimelineBar::segmentClicked, this, &MainWindow::selectSegment);
+
+	// ── 자막 ──
+	m_subPanel->setOutsideCheck([this](const Subtitle &sb) {
+		return mapSubtitle(sb, enabledSegments(), 0).isEmpty();
+	});
+	connect(m_subPanel, &SubtitlePanel::changed, this, &MainWindow::subtitlesChanged);
+	connect(m_subPanel, &SubtitlePanel::selectionChanged, this, [this](int i) {
+		m_view->setSubtitles(m_subPanel->subtitles(), i);
+		if (i >= 0 && i < m_subPanel->subtitles().size()) {
+			const Subtitle &sb = m_subPanel->subtitles()[i];
+			const double here = m_player->position() / 1000.0;
+			if (here < sb.start || here > sb.end) {
+				m_playEnd = -1;
+				m_player->setPosition(qint64(sb.start * 1000) + 50);
+			}
+		}
+	});
+	connect(m_subPanel, &SubtitlePanel::seekRequested, this, [this](double t) {
+		m_playEnd = -1;
+		m_player->setPosition(qint64(t * 1000) + 50);
+	});
+	connect(m_view, &VideoView::subtitleClicked, m_subPanel, &SubtitlePanel::select);
+	connect(m_view, &VideoView::subtitleMoved, this,
+		[this](int i, double y) { m_subPanel->setSelectedPosY(i, y); });
+}
+
+QVector<Segment> MainWindow::enabledSegments() const
+{
+	QVector<Segment> on;
+	for (const Segment &s : m_segs)
+		if (s.enabled)
+			on.push_back(s);
+	return on;
+}
+
+void MainWindow::subtitlesChanged()
+{
+	m_view->setSubtitles(m_subPanel->subtitles(), m_subPanel->selected());
+	m_timeline->setSubtitles(m_subPanel->subtitles());
+	saveCache();
 }
 
 // ───────────────────────── 영상 열기 ─────────────────────────
@@ -479,6 +527,9 @@ void MainWindow::openVideo(const QString &path)
 	m_scanComplete = false;
 	m_exportStatus->clear();
 	m_exportProgress->setValue(0);
+	m_subPanel->setSubtitles({});
+	m_subPanel->setDuration(info.duration);
+	m_subPanel->setVideoLoaded(true);
 	m_scanProgress->setValue(0);
 
 	// 영역: 마지막에 쓴 프리셋 → 기본 위치
@@ -513,6 +564,7 @@ void MainWindow::openVideo(const QString &path)
 	}
 	updateRoiLabel();
 	refreshTable();
+	subtitlesChanged();
 	setBusy(false, false);
 }
 
@@ -682,6 +734,7 @@ void MainWindow::refreshTable()
 	if (keep >= 0 && keep < m_segs.size())
 		m_table->selectRow(keep);
 	m_timeline->setData(m_segs, m_events, m_assist->isChecked());
+	m_subPanel->refreshMarks();
 	refreshSummary();
 }
 
@@ -825,7 +878,7 @@ void MainWindow::startExport()
 	m_exportProgress->setValue(0);
 	m_exportStatus->setText(QString("내보내는 중… (클립 %1개)").arg(count));
 	setBusy(false, true);
-	m_exporter->start(m_path, m_info, m_segs, s);
+	m_exporter->start(m_path, m_info, m_segs, m_subPanel->subtitles(), s);
 }
 
 void MainWindow::setBusy(bool scanning, bool exporting)
@@ -856,7 +909,8 @@ QString MainWindow::cachePath() const
 
 void MainWindow::saveCache()
 {
-	if (m_path.isEmpty() || (m_events.isEmpty() && m_segs.isEmpty() && m_scannedUntil <= 0))
+	if (m_path.isEmpty() ||
+	    (m_events.isEmpty() && m_segs.isEmpty() && m_scannedUntil <= 0 && m_subPanel->subtitles().isEmpty()))
 		return;
 	QJsonObject o;
 	o["version"] = 1;
@@ -865,6 +919,7 @@ void MainWindow::saveCache()
 	o["preset"] = m_roiPreset;
 	o["events"] = eventsToJson(m_events);
 	o["segments"] = segmentsToJson(m_segs);
+	o["subtitles"] = subtitlesToJson(m_subPanel->subtitles());
 	o["edited"] = m_edited;
 	o["scannedUntil"] = m_scannedUntil;
 	o["complete"] = m_scanComplete;
@@ -888,8 +943,9 @@ bool MainWindow::loadCache()
 	}
 	m_events = eventsFromJson(o["events"].toArray());
 	m_segs = segmentsFromJson(o["segments"].toArray());
+	m_subPanel->setSubtitles(subtitlesFromJson(o["subtitles"].toArray()));
 	m_edited = o["edited"].toBool();
 	m_scannedUntil = o["scannedUntil"].toDouble();
 	m_scanComplete = o["complete"].toBool();
-	return !m_events.isEmpty() || !m_segs.isEmpty() || m_scannedUntil > 0;
+	return !m_events.isEmpty() || !m_segs.isEmpty() || m_scannedUntil > 0 || !m_subPanel->subtitles().isEmpty();
 }

@@ -2,6 +2,8 @@
 
 #include <QDir>
 #include <QFile>
+#include <QHash>
+#include "FontManager.h"
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QTextStream>
@@ -76,7 +78,16 @@ double Exporter::outputLength(const QVector<Segment> &segments, double crossfade
 	return std::max(0.0, sum - std::max(0, int(segments.size()) - 1) * crossfade);
 }
 
-QString Exporter::buildFilter(const QVector<Segment> &segs, const VideoInfo &info, const ExportSettings &s, int W, int H,
+QString Exporter::filterPath(const QString &path)
+{
+	QString p = QDir::fromNativeSeparators(path);
+	p.replace("'", "'\\''");
+	p.replace(":", "\\:");
+	return "'" + p + "'";
+}
+
+QString Exporter::buildFilter(const QVector<Segment> &segs, const QVector<Subtitle> &subs, const QStringList &textFiles,
+			      const QStringList &fontFiles, const VideoInfo &info, const ExportSettings &s, int W, int H,
 			      double fps, double *totalOut)
 {
 	const int n = int(segs.size());
@@ -147,6 +158,43 @@ QString Exporter::buildFilter(const QVector<Segment> &segs, const VideoInfo &inf
 		vf = vfs.join(',');
 		af = afs.join(',');
 	}
+
+	// 자막: 원본 시간 → 결과 시간으로 옮겨서 drawtext (페이드 인/아웃 전에 → 같이 어두워짐)
+	const double k = H / 1080.0;
+	QStringList texts;
+	for (int i = 0; i < subs.size() && i < textFiles.size() && i < fontFiles.size(); ++i) {
+		const Subtitle &sb = subs[i];
+		if (textFiles[i].isEmpty() || fontFiles[i].isEmpty() || sb.text.trimmed().isEmpty())
+			continue;
+		for (const SubtitlePiece &pc : mapSubtitle(sb, segs, d)) {
+			const double a = pc.outStart, b = std::min(pc.outEnd, total);
+			if (b - a < 0.05)
+				continue;
+			const double f = sb.fade ? std::min(kSubtitleFade, (b - a) / 2) : 0;
+			QString alpha = "1";
+			if (f > 0 && (pc.fadeIn || pc.fadeOut)) {
+				const QString in = pc.fadeIn ? QString("min(1,(t-%1)/%2)").arg(fmt(a), fmt(f)) : "1";
+				const QString out = pc.fadeOut ? QString("min(1,(%1-t)/%2)").arg(fmt(b), fmt(f)) : "1";
+				alpha = QString("max(0,min(%1,%2))").arg(in, out);
+			}
+			QString dt = QString("drawtext=fontfile=%1:textfile=%2:fontsize=%3:fontcolor=%4:text_align=C:expansion=none:"
+					     "x=(w-text_w)/2:y=h*%5-text_h:enable='between(t,%6,%7)':alpha='%8'")
+					     .arg(filterPath(fontFiles[i]), filterPath(textFiles[i]))
+					     .arg(std::max(1, int(std::lround(sb.size * k))))
+					     .arg("0x" + sb.color.name().mid(1), fmt(sb.posY), fmt(a), fmt(b), alpha);
+			if (sb.outlineWidth > 0)
+				dt += QString(":borderw=%1:bordercolor=0x%2")
+					      .arg(std::max(1, int(std::lround(sb.outlineWidth * k))))
+					      .arg(sb.outline.name().mid(1));
+			if (sb.shadow)
+				dt += QString(":shadowx=%1:shadowy=%1:shadowcolor=black@0.6").arg(std::max(1, int(std::lround(3 * k))));
+			if (sb.box)
+				dt += QString(":box=1:boxcolor=black@0.45:boxborderw=%1").arg(int(std::lround(sb.size * k * 0.3)));
+			texts << dt;
+		}
+	}
+	if (!texts.isEmpty())
+		vf = texts.join(',') + "," + vf;
 	parts << QString("[%1]%2,format=yuv420p[vout]").arg(vLast, vf);
 	parts << QString("[%1]%2[aout]").arg(aLast, af);
 	return parts.join(";\n");
@@ -208,16 +256,18 @@ QStringList Exporter::encoderArgs(const QString &enc, double fps)
 }
 
 void Exporter::start(const QString &input, const VideoInfo &info, const QVector<Segment> &segments,
-		     const ExportSettings &s)
+		     const QVector<Subtitle> &subtitles, const ExportSettings &s)
 {
+	m_subs = subtitles;
 	cancel();
-	m_input = input;
+	m_input = QFileInfo(input).absoluteFilePath(); // ffmpeg 는 임시 폴더에서 실행되므로 절대 경로로
 	m_info = info;
 	m_segs.clear();
 	for (const Segment &seg : segments)
 		if (seg.enabled && seg.length() > 0.2)
 			m_segs.push_back(seg);
 	m_set = s;
+	m_set.outPath = QFileInfo(s.outPath).absoluteFilePath();
 	if (m_segs.isEmpty()) {
 		emit finished(false, "내보낼 클립이 없어요");
 		return;
@@ -237,7 +287,36 @@ void Exporter::run(const QString &encoder)
 	double fps = m_set.fps > 0 ? m_set.fps : m_info.fps;
 	fps = std::clamp(fps, 10.0, 60.0);
 
-	const QString filter = buildFilter(m_segs, m_info, m_set, outW, outH, fps, &m_total);
+	// 자막 글자·글꼴은 임시 폴더에 짧은 이름으로 (ffmpeg 를 그 폴더에서 실행)
+	m_tmp = std::make_unique<QTemporaryDir>(QDir::tempPath() + "/erkillcut_XXXXXX");
+	QStringList textFiles, fontFiles;
+	QHash<QString, QString> fontCopies; // 원본 글꼴 → 복사본 이름
+	for (int i = 0; i < m_subs.size(); ++i) {
+		QString textName, fontName;
+		if (m_tmp->isValid() && !m_subs[i].text.trimmed().isEmpty()) {
+			textName = QString("sub_%1.txt").arg(i);
+			QFile f(m_tmp->filePath(textName));
+			if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+				QString t = m_subs[i].text;
+				t.remove(QChar('\r'));
+				f.write(t.toUtf8());
+			} else {
+				textName.clear();
+			}
+			const QString src = FontManager::renderFile(m_subs[i].font);
+			fontName = fontCopies.value(src);
+			if (fontName.isEmpty()) {
+				fontName = QString("font_%1.%2").arg(fontCopies.size()).arg(QFileInfo(src).suffix().toLower());
+				if (QFile::copy(src, m_tmp->filePath(fontName)))
+					fontCopies.insert(src, fontName);
+				else
+					fontName.clear(); // 글꼴 파일이 없으면 이 자막은 건너뜀
+			}
+		}
+		textFiles << textName;
+		fontFiles << fontName;
+	}
+	const QString filter = buildFilter(m_segs, m_subs, textFiles, fontFiles, m_info, m_set, outW, outH, fps, &m_total);
 	m_script = std::make_unique<QTemporaryFile>(QDir::tempPath() + "/erkillcut_filter_XXXXXX.txt");
 	if (!m_script->open()) {
 		emit finished(false, "임시 파일을 만들지 못했어요");
@@ -262,6 +341,8 @@ void Exporter::run(const QString &encoder)
 
 	QDir().mkpath(QFileInfo(m_set.outPath).absolutePath());
 	setQuietProcess(m_proc, false);
+	if (m_tmp && m_tmp->isValid())
+		m_proc.setWorkingDirectory(m_tmp->path());
 	m_proc.start(ffmpegPath(), args);
 }
 

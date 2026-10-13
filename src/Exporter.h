@@ -1,10 +1,12 @@
 #pragma once
 
 #include "Segments.h"
+#include "Subtitles.h"
 #include "Util.h"
 
 #include <QObject>
 #include <QProcess>
+#include <QTemporaryDir>
 #include <QTemporaryFile>
 
 #include <memory>
@@ -28,7 +30,8 @@ public:
 	explicit Exporter(QObject *parent = nullptr);
 	~Exporter() override;
 
-	void start(const QString &input, const VideoInfo &info, const QVector<Segment> &segments, const ExportSettings &s);
+	void start(const QString &input, const VideoInfo &info, const QVector<Segment> &segments,
+		   const QVector<Subtitle> &subtitles, const ExportSettings &s);
 	void cancel();
 	bool isRunning() const { return m_proc.state() != QProcess::NotRunning; }
 
@@ -37,8 +40,14 @@ public:
 	// 결과 영상 길이
 	static double outputLength(const QVector<Segment> &segments, double crossfade);
 	// ffmpeg 필터 그래프 (테스트용으로 공개)
-	static QString buildFilter(const QVector<Segment> &segments, const VideoInfo &info, const ExportSettings &s,
-				   int outW, int outH, double fps, double *totalOut);
+	//  textFiles / fontFiles: 자막마다 글자 파일·글꼴 파일 (subtitles 와 같은 순서, 빈 자막은 빈 문자열)
+	//  ffmpeg 는 임시 폴더에서 실행하고 파일은 짧은 영문 이름으로 복사해 넘김
+	//  → 한글·공백·따옴표·콜론이 들어간 경로도 필터 안에서 문제 없음
+	static QString buildFilter(const QVector<Segment> &segments, const QVector<Subtitle> &subtitles,
+				   const QStringList &textFiles, const QStringList &fontFiles, const VideoInfo &info,
+				   const ExportSettings &s, int outW, int outH, double fps, double *totalOut);
+	// 필터 안에 넣을 파일 경로 (C:\a → 'C\:/a')
+	static QString filterPath(const QString &path);
 
 signals:
 	void progress(double fraction);
@@ -56,6 +65,8 @@ private:
 	QString m_input;
 	VideoInfo m_info;
 	QVector<Segment> m_segs;
+	QVector<Subtitle> m_subs;
+	std::unique_ptr<QTemporaryDir> m_tmp;
 	ExportSettings m_set;
 	QString m_encoder;
 	double m_total = 0;

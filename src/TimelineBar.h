@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Segments.h"
+#include "Subtitles.h"
 
 #include <QWidget>
 
@@ -15,6 +16,7 @@ public:
 	void setScanned(double t);
 	void setData(const QVector<Segment> &segs, const QVector<KillEvent> &events, bool includeAssist);
 	void setSelected(int index);
+	void setSubtitles(const QVector<Subtitle> &subs);
 	QSize sizeHint() const override { return {600, 44}; }
 
 signals:
@@ -37,4 +39,5 @@ private:
 	bool m_assist = false;
 	QVector<Segment> m_segs;
 	QVector<KillEvent> m_events;
+	QVector<Subtitle> m_subs;
 };

@@ -1,6 +1,9 @@
+#include "FontManager.h"
 #include "MainWindow.h"
+#include "SubtitlePanel.h"
 
 #include <QApplication>
+#include <QTabWidget>
 #include <QTimer>
 #include <QStyleFactory>
 
@@ -13,6 +16,8 @@ int main(int argc, char *argv[])
 	if (QStyleFactory::keys().contains("Fusion"))
 		app.setStyle(QStyleFactory::create("Fusion"));
 
+	FontManager::init(); // 추가해 둔 자막 글꼴 등록
+
 	MainWindow w;
 	w.show();
 	const QStringList args = app.arguments();
@@ -22,6 +27,13 @@ int main(int argc, char *argv[])
 	const QString snap = qEnvironmentVariable("ERKILLCUT_SNAPSHOT");
 	if (!snap.isEmpty())
 		QTimer::singleShot(3000, &w, [&w, snap] {
+			if (qEnvironmentVariableIsSet("ERKILLCUT_SNAPSHOT_TAB"))
+				for (auto *t : w.findChildren<QTabWidget *>())
+					t->setCurrentIndex(qEnvironmentVariableIntValue("ERKILLCUT_SNAPSHOT_TAB"));
+			if (qEnvironmentVariableIsSet("ERKILLCUT_SNAPSHOT_SUB"))
+				if (auto *sp = w.findChild<SubtitlePanel *>())
+					sp->select(qEnvironmentVariableIntValue("ERKILLCUT_SNAPSHOT_SUB"));
+			QApplication::processEvents();
 			w.grab().save(snap);
 			QApplication::quit();
 		});

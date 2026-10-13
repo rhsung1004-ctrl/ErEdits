@@ -96,6 +96,7 @@ jobs:
           - 영상 화면만 분석하며 어떤 정보도 외부로 보내지 않습니다.
           - 보증 없이 "있는 그대로" 제공됩니다.
           - 라이선스: GNU GPL v3 (LICENSE.txt), 포함 구성요소 고지: THIRD_PARTY_NOTICES.txt
+          - 소스 코드: https://github.com/rhsung1004-ctrl/ErEdits
           "@ | Out-File "$dist/실행방법.txt" -Encoding utf8
 
           Get-ChildItem $dist | Format-Table Name, Length

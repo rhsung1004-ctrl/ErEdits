@@ -17,7 +17,8 @@ class QMediaPlayer;
 class QProgressBar;
 class QPushButton;
 class QTableWidget;
-class QVideoWidget;
+class SubtitlePanel;
+class VideoView;
 class TimelineBar;
 
 class MainWindow : public QMainWindow {
@@ -50,6 +51,8 @@ private:
 	void startExport();
 	void updateRoiLabel();
 	void setBusy(bool scanning, bool exporting);
+	void subtitlesChanged();
+	QVector<Segment> enabledSegments() const;
 	SegmentParams params() const;
 
 	// 분석 결과를 영상별로 저장 (몇 시간짜리를 다시 분석하지 않게)
@@ -77,7 +80,8 @@ private:
 	// 화면
 	QMediaPlayer *m_player;
 	QAudioOutput *m_audio;
-	QVideoWidget *m_video;
+	VideoView *m_view;
+	SubtitlePanel *m_subPanel;
 	TimelineBar *m_timeline;
 	QPushButton *m_btnPlay;
 	QLabel *m_posLabel;

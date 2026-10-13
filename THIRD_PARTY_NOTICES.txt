@@ -4,6 +4,7 @@ ERKillCut — 라이선스 및 제3자 구성요소 고지 / License & Third-Par
 ERKillCut
 ---------
 Copyright (C) 2026 rhsung1004-ctrl
+소스 코드 / Source code: https://github.com/rhsung1004-ctrl/ErEdits
 
 이 프로그램은 자유 소프트웨어입니다. GNU 일반 공중 사용 허가서(GPL) 버전 3
 또는 (선택에 따라) 그 이후 버전의 조건에 따라 재배포하거나 수정할 수 있습니다.
@@ -18,7 +19,7 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY
 WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
 PARTICULAR PURPOSE. See the LICENSE file for details.
 
-킬 감지 코드(src/HudKillWatcher.*)는 같은 제작자의 ERShorts(GPL v3)에서 가져왔습니다.
+킬 감지 코드(src/HudKillWatcher.*)와 글꼴 관리 코드(src/FontManager.*)는 같은 제작자의 ERShorts(GPL v3)에서 가져왔습니다.
   https://github.com/rhsung1004-ctrl/ershorts
 
 

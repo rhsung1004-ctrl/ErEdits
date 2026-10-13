@@ -1,16 +1,20 @@
 // 화면 없이 엔진만 검사하는 도구
 //   erkillcut_cli scan <영상> [fast] [x y w h]
-//   erkillcut_cli export <영상> <결과.mp4> <시작-끝,시작-끝,...> [크로스페이드] [페이드인] [페이드아웃]
+//   erkillcut_cli export <영상> <결과.mp4> <시작-끝,시작-끝,...> [크로스페이드] [페이드인] [페이드아웃] ["시작-끝|글자;..." [글꼴파일]]
 #include "Exporter.h"
 #include "KillScanner.h"
 #include "Util.h"
 
-#include <QCoreApplication>
+#include "FontManager.h"
+
+#include <QGuiApplication>
 #include <QTextStream>
 
 int main(int argc, char *argv[])
 {
-	QCoreApplication app(argc, argv);
+	qputenv("QT_QPA_PLATFORM", "offscreen");
+	QGuiApplication app(argc, argv);
+	FontManager::init();
 	QTextStream out(stdout);
 	const QStringList a = app.arguments();
 	if (a.size() < 3) {
@@ -68,9 +72,28 @@ int main(int argc, char *argv[])
 		if (a.size() > 7)
 			s.fadeOut = a[7].toDouble();
 		s.cpuOnly = true;
+		QVector<Subtitle> subs;
+		if (a.size() > 8)
+			for (const QString &p : a[8].split(';', Qt::SkipEmptyParts)) {
+				Subtitle sb;
+				sb.start = p.section('|', 0, 0).section('-', 0, 0).toDouble();
+				sb.end = p.section('|', 0, 0).section('-', 1, 1).toDouble();
+				sb.text = p.section('|', 1).replace("\\n", "\n");
+				sb.box = subs.size() % 2 == 1;
+				if (a.size() > 9) {
+					QString err;
+					sb.font = FontManager::addFontFile(a[9], &err);
+				}
+				subs.push_back(sb);
+			}
 		double total = 0;
-		out << Exporter::buildFilter(segs, info, s, 1280, 720, info.fps, &total) << "\nexpected length " << total
-		    << "\n";
+		QStringList tf, ff;
+		for (int i = 0; i < subs.size(); ++i) {
+			tf << QString("sub_%1.txt").arg(i);
+			ff << "font_0.ttf";
+		}
+		out << Exporter::buildFilter(segs, subs, tf, ff, info, s, 1280, 720, info.fps, &total) << "\nexpected length "
+		    << total << "\n";
 		out.flush();
 		Exporter ex;
 		QObject::connect(&ex, &Exporter::finished, [&](bool ok, const QString &msg) {
@@ -78,7 +101,7 @@ int main(int argc, char *argv[])
 			out.flush();
 			app.exit(ok ? 0 : 1);
 		});
-		ex.start(a[2], info, segs, s);
+		ex.start(a[2], info, segs, subs, s);
 		return app.exec();
 	}
 	return 2;
