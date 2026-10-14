@@ -3,6 +3,7 @@
 #include "Segments.h"
 
 #include <QColor>
+#include <QImage>
 #include <QJsonArray>
 #include <QString>
 #include <QVector>
@@ -26,6 +27,7 @@ struct Subtitle {
 	bool box = false;      // 반투명 검은 박스
 	bool fade = true;      // 0.2초 페이드로 나타나고 사라짐
 	double posY = 0.9;     // 자막 아래쪽 끝의 세로 위치 (화면 높이 대비 0~1)
+	QString combo = QStringLiteral("기본"); // 스킬 콤보 색 프리셋 이름 (빈 문자열 = 사용 안 함)
 
 	double length() const { return end - start; }
 	void copyStyleFrom(const Subtitle &o);
@@ -47,6 +49,10 @@ double sourceToOutput(double t, const QVector<Segment> &enabledSegs, double cros
 // 반환: 자막이 차지한 영역 (끌어서 옮기기용)
 QRectF paintSubtitle(QPainter &p, const QRectF &canvas, const Subtitle &s, double alpha);
 double subtitleAlphaAt(const Subtitle &s, double t);
+
+// 내보내기용: 결과 화면(W x H) 크기로 자막만 그린 투명 이미지 (자막이 있는 부분만 잘라서)
+// topLeft = 결과 화면에서 이미지가 놓일 자리. 빈 자막이면 null 이미지
+QImage renderSubtitleImage(const Subtitle &s, int W, int H, QPoint *topLeft);
 
 QJsonArray subtitlesToJson(const QVector<Subtitle> &subs);
 QVector<Subtitle> subtitlesFromJson(const QJsonArray &a);

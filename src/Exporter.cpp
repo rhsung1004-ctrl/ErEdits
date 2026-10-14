@@ -3,7 +3,6 @@
 #include <QDir>
 #include <QFile>
 #include <QHash>
-#include "FontManager.h"
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QTextStream>
@@ -78,17 +77,8 @@ double Exporter::outputLength(const QVector<Segment> &segments, double crossfade
 	return std::max(0.0, sum - std::max(0, int(segments.size()) - 1) * crossfade);
 }
 
-QString Exporter::filterPath(const QString &path)
-{
-	QString p = QDir::fromNativeSeparators(path);
-	p.replace("'", "'\\''");
-	p.replace(":", "\\:");
-	return "'" + p + "'";
-}
-
-QString Exporter::buildFilter(const QVector<Segment> &segs, const QVector<Subtitle> &subs, const QStringList &textFiles,
-			      const QStringList &fontFiles, const VideoInfo &info, const ExportSettings &s, int W, int H,
-			      double fps, double *totalOut)
+QString Exporter::buildFilter(const QVector<Segment> &segs, const QVector<Overlay> &overlays, const VideoInfo &info,
+			      const ExportSettings &s, int W, int H, double fps, double *totalOut)
 {
 	const int n = int(segs.size());
 	const double d = effectiveCrossfade(segs, s.crossfade);
@@ -159,42 +149,25 @@ QString Exporter::buildFilter(const QVector<Segment> &segs, const QVector<Subtit
 		af = afs.join(',');
 	}
 
-	// 자막: 원본 시간 → 결과 시간으로 옮겨서 drawtext (페이드 인/아웃 전에 → 같이 어두워짐)
-	const double k = H / 1080.0;
-	QStringList texts;
-	for (int i = 0; i < subs.size() && i < textFiles.size() && i < fontFiles.size(); ++i) {
-		const Subtitle &sb = subs[i];
-		if (textFiles[i].isEmpty() || fontFiles[i].isEmpty() || sb.text.trimmed().isEmpty())
-			continue;
-		for (const SubtitlePiece &pc : mapSubtitle(sb, segs, d)) {
-			const double a = pc.outStart, b = std::min(pc.outEnd, total);
-			if (b - a < 0.05)
-				continue;
-			const double f = sb.fade ? std::min(kSubtitleFade, (b - a) / 2) : 0;
-			QString alpha = "1";
-			if (f > 0 && (pc.fadeIn || pc.fadeOut)) {
-				const QString in = pc.fadeIn ? QString("min(1,(t-%1)/%2)").arg(fmt(a), fmt(f)) : "1";
-				const QString out = pc.fadeOut ? QString("min(1,(%1-t)/%2)").arg(fmt(b), fmt(f)) : "1";
-				alpha = QString("max(0,min(%1,%2))").arg(in, out);
-			}
-			QString dt = QString("drawtext=fontfile=%1:textfile=%2:fontsize=%3:fontcolor=%4:text_align=C:expansion=none:"
-					     "x=(w-text_w)/2:y=h*%5-text_h:enable='between(t,%6,%7)':alpha='%8'")
-					     .arg(filterPath(fontFiles[i]), filterPath(textFiles[i]))
-					     .arg(std::max(1, int(std::lround(sb.size * k))))
-					     .arg("0x" + sb.color.name().mid(1), fmt(sb.posY), fmt(a), fmt(b), alpha);
-			if (sb.outlineWidth > 0)
-				dt += QString(":borderw=%1:bordercolor=0x%2")
-					      .arg(std::max(1, int(std::lround(sb.outlineWidth * k))))
-					      .arg(sb.outline.name().mid(1));
-			if (sb.shadow)
-				dt += QString(":shadowx=%1:shadowy=%1:shadowcolor=black@0.6").arg(std::max(1, int(std::lround(3 * k))));
-			if (sb.box)
-				dt += QString(":box=1:boxcolor=black@0.45:boxborderw=%1").arg(int(std::lround(sb.size * k * 0.3)));
-			texts << dt;
-		}
+	// 자막 이미지 겹치기 (영상 처음/끝 페이드보다 먼저 → 같이 어두워짐)
+	for (int i = 0; i < overlays.size(); ++i) {
+		const Overlay &o = overlays[i];
+		const double len = o.end - o.start;
+		QString chain = QString("[%1:v]format=rgba").arg(o.input);
+		if (o.fadeIn > 0)
+			chain += QString(",fade=t=in:st=0:d=%1:alpha=1").arg(fmt(o.fadeIn));
+		if (o.fadeOut > 0)
+			chain += QString(",fade=t=out:st=%1:d=%2:alpha=1").arg(fmt(std::max(0.0, len - o.fadeOut)), fmt(o.fadeOut));
+		parts << chain + QString(",setpts=PTS-STARTPTS+%1/TB[sub%2]").arg(fmt(o.start)).arg(i);
+		const QString out = QString("vs%1").arg(i);
+		parts << QString("[%1][sub%2]overlay=x=%3:y=%4:eof_action=pass:enable='between(t,%5,%6)'[%7]")
+				 .arg(vLast)
+				 .arg(i)
+				 .arg(o.x)
+				 .arg(o.y)
+				 .arg(fmt(o.start), fmt(o.end), out);
+		vLast = out;
 	}
-	if (!texts.isEmpty())
-		vf = texts.join(',') + "," + vf;
 	parts << QString("[%1]%2,format=yuv420p[vout]").arg(vLast, vf);
 	parts << QString("[%1]%2[aout]").arg(aLast, af);
 	return parts.join(";\n");
@@ -287,36 +260,44 @@ void Exporter::run(const QString &encoder)
 	double fps = m_set.fps > 0 ? m_set.fps : m_info.fps;
 	fps = std::clamp(fps, 10.0, 60.0);
 
-	// 자막 글자·글꼴은 임시 폴더에 짧은 이름으로 (ffmpeg 를 그 폴더에서 실행)
+	// 자막: 결과 크기로 그린 PNG 를 임시 폴더에 두고 조각마다 입력으로 넣음
 	m_tmp = std::make_unique<QTemporaryDir>(QDir::tempPath() + "/erkillcut_XXXXXX");
-	QStringList textFiles, fontFiles;
-	QHash<QString, QString> fontCopies; // 원본 글꼴 → 복사본 이름
-	for (int i = 0; i < m_subs.size(); ++i) {
-		QString textName, fontName;
-		if (m_tmp->isValid() && !m_subs[i].text.trimmed().isEmpty()) {
-			textName = QString("sub_%1.txt").arg(i);
-			QFile f(m_tmp->filePath(textName));
-			if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-				QString t = m_subs[i].text;
-				t.remove(QChar('\r'));
-				f.write(t.toUtf8());
-			} else {
-				textName.clear();
-			}
-			const QString src = FontManager::renderFile(m_subs[i].font);
-			fontName = fontCopies.value(src);
-			if (fontName.isEmpty()) {
-				fontName = QString("font_%1.%2").arg(fontCopies.size()).arg(QFileInfo(src).suffix().toLower());
-				if (QFile::copy(src, m_tmp->filePath(fontName)))
-					fontCopies.insert(src, fontName);
-				else
-					fontName.clear(); // 글꼴 파일이 없으면 이 자막은 건너뜀
-			}
+	const double d = effectiveCrossfade(m_segs, m_set.crossfade);
+	const double total = outputLength(m_segs, d);
+	QVector<Overlay> overlays;
+	QStringList overlayArgs;
+	const int firstInput = int(m_segs.size());
+	for (int i = 0; i < m_subs.size() && m_tmp->isValid(); ++i) {
+		const Subtitle &sb = m_subs[i];
+		const QVector<SubtitlePiece> pieces = mapSubtitle(sb, m_segs, d);
+		if (pieces.isEmpty())
+			continue;
+		QPoint at;
+		const QImage img = renderSubtitleImage(sb, outW, outH, &at);
+		if (img.isNull())
+			continue;
+		const QString file = m_tmp->filePath(QString("sub_%1.png").arg(i));
+		if (!img.save(file, "PNG"))
+			continue;
+		for (const SubtitlePiece &pc : pieces) {
+			Overlay o;
+			o.start = pc.outStart;
+			o.end = std::min(pc.outEnd, total);
+			if (o.end - o.start < 0.05)
+				continue;
+			const double f = sb.fade ? std::min(kSubtitleFade, (o.end - o.start) / 2) : 0;
+			o.fadeIn = pc.fadeIn ? f : 0;
+			o.fadeOut = pc.fadeOut ? f : 0;
+			o.x = at.x();
+			o.y = at.y();
+			o.input = firstInput + int(overlays.size());
+			overlays.push_back(o);
+			overlayArgs << "-loop" << "1" << "-framerate" << QString::number(fps, 'g', 6) << "-t"
+				    << fmt(o.end - o.start + 0.1) << "-i" << file;
 		}
-		textFiles << textName;
-		fontFiles << fontName;
 	}
-	const QString filter = buildFilter(m_segs, m_subs, textFiles, fontFiles, m_info, m_set, outW, outH, fps, &m_total);
+	const QString filter = buildFilter(m_segs, overlays, m_info, m_set, outW, outH, fps, &m_total);
+	m_lastFilter = filter;
 	m_script = std::make_unique<QTemporaryFile>(QDir::tempPath() + "/erkillcut_filter_XXXXXX.txt");
 	if (!m_script->open()) {
 		emit finished(false, "임시 파일을 만들지 못했어요");
@@ -331,6 +312,7 @@ void Exporter::run(const QString &encoder)
 		// 앞뒤로 조금 넉넉히 읽고 필터에서 정확히 자름
 		args << "-ss" << fmt(seg.start) << "-t" << fmt(seg.length() + 1.0) << "-i" << m_input;
 	}
+	args << overlayArgs;
 	if (ffmpegHasNewScriptOption())
 		args << "-/filter_complex" << m_script->fileName();
 	else

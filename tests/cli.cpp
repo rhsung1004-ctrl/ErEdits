@@ -86,21 +86,16 @@ int main(int argc, char *argv[])
 				}
 				subs.push_back(sb);
 			}
-		double total = 0;
-		QStringList tf, ff;
-		for (int i = 0; i < subs.size(); ++i) {
-			tf << QString("sub_%1.txt").arg(i);
-			ff << "font_0.ttf";
-		}
-		out << Exporter::buildFilter(segs, subs, tf, ff, info, s, 1280, 720, info.fps, &total) << "\nexpected length "
-		    << total << "\n";
-		out.flush();
 		Exporter ex;
 		QObject::connect(&ex, &Exporter::finished, [&](bool ok, const QString &msg) {
+			out << ex.lastFilter() << "\n";
 			out << "finished ok=" << ok << " " << msg << "\n";
 			out.flush();
 			app.exit(ok ? 0 : 1);
 		});
+		if (qEnvironmentVariableIsSet("COMBO"))
+			for (Subtitle &sb : subs)
+				sb.combo = qEnvironmentVariable("COMBO");
 		ex.start(a[2], info, segs, subs, s);
 		return app.exec();
 	}

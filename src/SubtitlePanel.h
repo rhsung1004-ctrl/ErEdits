@@ -47,6 +47,7 @@ private:
 	void loadEditor();
 	void applyEditor();
 	void refreshFonts(const QString &selectPath);
+	void refreshCombos(const QString &selectName);
 	void addAtPlayhead();
 	void removeSelected();
 	void setStartOrEnd(bool start);
@@ -72,5 +73,6 @@ private:
 	QColor m_colorVal = Qt::white, m_outlineVal = Qt::black;
 	QCheckBox *m_shadow, *m_box, *m_fade;
 	QSlider *m_posY;
+	QComboBox *m_combo;
 	QWidget *m_editor;
 };

@@ -1,5 +1,7 @@
 #include "VideoView.h"
 
+#include "ComboColors.h"
+
 #include <QMouseEvent>
 #include <QPainter>
 #include <QVideoSink>
@@ -10,6 +12,7 @@ VideoView::VideoView(QWidget *parent) : QWidget(parent), m_sink(new QVideoSink(t
 {
 	setMinimumSize(480, 270);
 	setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	connect(ComboColors::notifier(), &ComboColors::Notifier::changed, this, qOverload<>(&QWidget::update));
 	connect(m_sink, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame &f) {
 		if (!f.isValid())
 			return;

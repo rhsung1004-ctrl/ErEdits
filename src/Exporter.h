@@ -39,15 +39,19 @@ public:
 	static double effectiveCrossfade(const QVector<Segment> &segments, double wanted);
 	// 결과 영상 길이
 	static double outputLength(const QVector<Segment> &segments, double crossfade);
+	// 자막 한 조각: 미리 그려 둔 투명 PNG 를 결과 시간 start~end 에 x,y 로 겹침
+	//  (미리보기와 같은 Qt 그리기 코드로 만들기 때문에 글꼴·색·테두리·콤보 색이 똑같이 나옴)
+	struct Overlay {
+		int input = 0;           // ffmpeg 입력 번호
+		int x = 0, y = 0;
+		double start = 0, end = 0; // 결과 영상 기준 초
+		double fadeIn = 0, fadeOut = 0;
+	};
 	// ffmpeg 필터 그래프 (테스트용으로 공개)
-	//  textFiles / fontFiles: 자막마다 글자 파일·글꼴 파일 (subtitles 와 같은 순서, 빈 자막은 빈 문자열)
-	//  ffmpeg 는 임시 폴더에서 실행하고 파일은 짧은 영문 이름으로 복사해 넘김
-	//  → 한글·공백·따옴표·콜론이 들어간 경로도 필터 안에서 문제 없음
-	static QString buildFilter(const QVector<Segment> &segments, const QVector<Subtitle> &subtitles,
-				   const QStringList &textFiles, const QStringList &fontFiles, const VideoInfo &info,
-				   const ExportSettings &s, int outW, int outH, double fps, double *totalOut);
-	// 필터 안에 넣을 파일 경로 (C:\a → 'C\:/a')
-	static QString filterPath(const QString &path);
+	static QString buildFilter(const QVector<Segment> &segments, const QVector<Overlay> &overlays,
+				   const VideoInfo &info, const ExportSettings &s, int outW, int outH, double fps,
+				   double *totalOut);
+	QString lastFilter() const { return m_lastFilter; }
 
 signals:
 	void progress(double fraction);
@@ -73,4 +77,5 @@ private:
 	bool m_cancelled = false;
 	QString m_err;
 	QByteArray m_out;
+	QString m_lastFilter;
 };

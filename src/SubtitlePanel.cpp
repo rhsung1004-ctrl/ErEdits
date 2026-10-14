@@ -1,5 +1,7 @@
 #include "SubtitlePanel.h"
 
+#include "ComboColors.h"
+#include "ComboDialog.h"
 #include "FontManager.h"
 #include "Util.h"
 
@@ -88,7 +90,10 @@ SubtitlePanel::SubtitlePanel(QWidget *parent) : QWidget(parent)
 	m_posY = new QSlider(Qt::Horizontal);
 	m_posY->setRange(5, 100);
 	m_posY->setToolTip("자막 아래쪽 끝의 위치 (미리보기 화면에서 자막을 직접 끌어도 돼요)");
-	m_btnAll = btn("이 모양을 모든 자막에 적용", "글꼴·크기·색·테두리·위치를 모든 자막에 똑같이");
+	m_btnAll = btn("이 모양을 모든 자막에 적용", "글꼴·크기·색·테두리·위치·콤보 색을 모든 자막에 똑같이");
+	m_combo = new QComboBox;
+	m_combo->setToolTip("Q-F-W-E-R-E-D 처럼 키를 - 로 이어 쓴 부분을 키마다 다른 색으로 (캐릭터별 프리셋)");
+	auto *btnCombo = btn("색 설정…", "캐릭터별 스킬 키 색 프리셋 만들기·고치기");
 
 	auto *fontRow = new QHBoxLayout;
 	fontRow->addWidget(m_font, 1);
@@ -112,6 +117,10 @@ SubtitlePanel::SubtitlePanel(QWidget *parent) : QWidget(parent)
 	posRow->addWidget(m_posY, 1);
 	posRow->addWidget(new QLabel("아래"));
 
+	auto *comboRow = new QHBoxLayout;
+	comboRow->addWidget(m_combo, 1);
+	comboRow->addWidget(btnCombo);
+
 	m_editor = new QWidget;
 	auto *form = new QFormLayout(m_editor);
 	form->setContentsMargins(0, 0, 0, 0);
@@ -121,6 +130,7 @@ SubtitlePanel::SubtitlePanel(QWidget *parent) : QWidget(parent)
 	form->addRow("모양", sizeRow);
 	form->addRow("", optRow);
 	form->addRow("세로 위치", posRow);
+	form->addRow("스킬 콤보 색", comboRow);
 	form->addRow("", m_btnAll);
 
 	auto *row1 = new QHBoxLayout;
@@ -136,6 +146,7 @@ SubtitlePanel::SubtitlePanel(QWidget *parent) : QWidget(parent)
 	lay->addWidget(m_editor);
 
 	refreshFonts({});
+	refreshCombos(ComboColors::defaultPresetName());
 	loadEditor();
 	setVideoLoaded(false);
 
@@ -161,6 +172,19 @@ SubtitlePanel::SubtitlePanel(QWidget *parent) : QWidget(parent)
 	connect(m_box, &QCheckBox::toggled, this, &SubtitlePanel::applyEditor);
 	connect(m_fade, &QCheckBox::toggled, this, &SubtitlePanel::applyEditor);
 	connect(m_posY, &QSlider::valueChanged, this, &SubtitlePanel::applyEditor);
+	connect(m_combo, &QComboBox::currentIndexChanged, this, &SubtitlePanel::applyEditor);
+	connect(btnCombo, &QPushButton::clicked, this, [this] {
+		const int i = selected();
+		Subtitle style = (i >= 0 && i < m_subs.size()) ? m_subs[i] : defaultStyle();
+		ComboDialog dlg(style, m_combo->currentData().toString().isEmpty() ? ComboColors::defaultPresetName()
+										    : m_combo->currentData().toString(),
+				this);
+		if (dlg.exec() != QDialog::Accepted)
+			return;
+		refreshCombos(dlg.selectedName());
+		applyEditor(); // 고른 자막에 방금 고른 프리셋 적용
+		emit changed(); // 색이 바뀌었으니 미리보기 다시
+	});
 	connect(m_color, &QPushButton::clicked, this, [this] {
 		const QColor c = QColorDialog::getColor(m_colorVal, this, "글자색");
 		if (c.isValid()) {
@@ -260,6 +284,24 @@ void SubtitlePanel::refreshFonts(const QString &selectPath)
 	m_loading = was;
 }
 
+void SubtitlePanel::refreshCombos(const QString &selectName)
+{
+	const bool was = m_loading;
+	m_loading = true;
+	m_combo->clear();
+	m_combo->addItem("사용 안 함", QString());
+	for (const ComboPreset &p : ComboColors::presets())
+		m_combo->addItem(p.name, p.name);
+	int idx = m_combo->findData(selectName);
+	if (idx < 0 && !selectName.isEmpty()) {
+		// 지워진 프리셋: 목록에 표시만 (고르면 색 없음)
+		m_combo->addItem(selectName + " (없음)", selectName);
+		idx = m_combo->count() - 1;
+	}
+	m_combo->setCurrentIndex(std::max(0, idx));
+	m_loading = was;
+}
+
 Subtitle SubtitlePanel::defaultStyle() const
 {
 	Subtitle s;
@@ -344,6 +386,7 @@ void SubtitlePanel::loadEditor()
 	m_box->setChecked(s.box);
 	m_fade->setChecked(s.fade);
 	m_posY->setValue(int(std::lround(s.posY * 100)));
+	refreshCombos(s.combo);
 	m_loading = false;
 }
 
@@ -368,6 +411,7 @@ void SubtitlePanel::applyEditor()
 	s.box = m_box->isChecked();
 	s.fade = m_fade->isChecked();
 	s.posY = m_posY->value() / 100.0;
+	s.combo = m_combo->currentData().toString();
 	saveDefaultStyle(s);
 	// 목록 글자만 갱신 (편집 중인 칸의 커서를 건드리지 않도록 표 전체는 다시 만들지 않음)
 	m_loading = true;

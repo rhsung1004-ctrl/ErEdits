@@ -1,7 +1,9 @@
 #include "Subtitles.h"
 
+#include "ComboColors.h"
 #include "FontManager.h"
 
+#include <QHash>
 #include <QJsonObject>
 #include <QPainter>
 #include <QPainterPath>
@@ -21,6 +23,7 @@ void Subtitle::copyStyleFrom(const Subtitle &o)
 	box = o.box;
 	fade = o.fade;
 	posY = o.posY;
+	combo = o.combo;
 }
 
 QVector<SubtitlePiece> mapSubtitle(const Subtitle &s, const QVector<Segment> &segs, double d)
@@ -75,12 +78,20 @@ double subtitleAlphaAt(const Subtitle &s, double t)
 	return std::clamp(std::min((t - s.start) / f, (s.end - t) / f), 0.0, 1.0);
 }
 
-QRectF paintSubtitle(QPainter &p, const QRectF &canvas, const Subtitle &s, double alpha)
+namespace {
+// 자막을 그릴 모양: 글자 전체 윤곽(테두리·그림자용) + 색마다 채울 윤곽
+struct SubtitleShape {
+	QPainterPath all;
+	QVector<QPair<QColor, QPainterPath>> fills;
+	QRectF textRect;
+	double k = 1;
+};
+
+SubtitleShape buildShape(const QRectF &canvas, const Subtitle &s)
 {
-	if (s.text.trimmed().isEmpty() || canvas.height() <= 0)
-		return {};
-	const double k = canvas.height() / 1080.0; // 1080p 기준 → 화면 크기
-	const QFont font = FontManager::qfont(s.font, std::max(1, int(std::lround(s.size * k))));
+	SubtitleShape sh;
+	sh.k = canvas.height() / 1080.0; // 1080p 기준 → 화면 크기
+	const QFont font = FontManager::qfont(s.font, std::max(1, int(std::lround(s.size * sh.k))));
 	const QFontMetricsF fm(font);
 	const QStringList lines = s.text.split('\n');
 	const double lineH = fm.lineSpacing();
@@ -88,48 +99,121 @@ QRectF paintSubtitle(QPainter &p, const QRectF &canvas, const Subtitle &s, doubl
 	const double bottom = canvas.top() + s.posY * canvas.height();
 	const double top = bottom - blockH;
 
-	QPainterPath path;
+	ComboPreset preset;
+	const bool combo = ComboColors::find(s.combo, &preset);
+	QHash<QRgb, int> fillIndex; // 색 → fills 위치
+	auto fillFor = [&](const QColor &c) -> QPainterPath & {
+		const auto it = fillIndex.constFind(c.rgba());
+		if (it != fillIndex.constEnd())
+			return sh.fills[*it].second;
+		fillIndex.insert(c.rgba(), int(sh.fills.size()));
+		sh.fills.push_back({c, QPainterPath()});
+		return sh.fills.back().second;
+	};
+
 	double maxW = 0;
 	for (int i = 0; i < lines.size(); ++i) {
-		const double w = fm.horizontalAdvance(lines[i]);
+		const QString &line = lines[i];
+		const double w = fm.horizontalAdvance(line);
 		maxW = std::max(maxW, w);
-		path.addText(QPointF(canvas.center().x() - w / 2, top + i * lineH + fm.ascent()), font, lines[i]);
+		const double x0 = canvas.center().x() - w / 2, y = top + i * lineH + fm.ascent();
+		if (!combo) {
+			QPainterPath lp;
+			lp.addText(QPointF(x0, y), font, line);
+			sh.all.addPath(lp);
+			fillFor(s.color).addPath(lp);
+			continue;
+		}
+		// 같은 색끼리 묶어서 그 자리부터 그림 (앞부분 폭만큼 오른쪽으로)
+		const QVector<QColor> colors = ComboColors::colorize(line, preset, s.color);
+		int a = 0;
+		while (a < line.size()) {
+			int b = a + 1;
+			while (b < line.size() && colors[b] == colors[a])
+				++b;
+			QPainterPath rp;
+			rp.addText(QPointF(x0 + fm.horizontalAdvance(line.left(a)), y), font, line.mid(a, b - a));
+			sh.all.addPath(rp);
+			fillFor(colors[a]).addPath(rp);
+			a = b;
+		}
 	}
-	const QRectF textRect(canvas.center().x() - maxW / 2, top, maxW, blockH);
+	sh.textRect = QRectF(canvas.center().x() - maxW / 2, top, maxW, blockH);
+	return sh;
+}
 
+QRectF drawShape(QPainter &p, const SubtitleShape &sh, const Subtitle &s, double alpha)
+{
+	const double k = sh.k;
 	p.save();
 	p.setRenderHint(QPainter::Antialiasing);
 	p.setOpacity(std::clamp(alpha, 0.0, 1.0));
 	if (s.box) {
 		const double pad = s.size * k * 0.3;
-		p.fillRect(textRect.adjusted(-pad, -pad, pad, pad), QColor(0, 0, 0, 115));
+		p.fillRect(sh.textRect.adjusted(-pad, -pad, pad, pad), QColor(0, 0, 0, 115));
 	}
 	if (s.shadow) {
 		const double off = 3 * k;
-		QPainterPath sh = path.translated(off, off);
+		QPainterPath shadow = sh.all.translated(off, off);
 		if (s.outlineWidth > 0) {
 			QPainterPathStroker st;
 			st.setWidth(2.0 * s.outlineWidth * k);
 			st.setJoinStyle(Qt::RoundJoin);
-			sh = sh.united(st.createStroke(sh));
+			shadow = shadow.united(st.createStroke(shadow));
 		}
-		p.fillPath(sh, QColor(0, 0, 0, 150));
+		p.fillPath(shadow, QColor(0, 0, 0, 150));
 	}
 	if (s.outlineWidth > 0) {
 		QPen pen(s.outline, 2.0 * s.outlineWidth * k);
 		pen.setJoinStyle(Qt::RoundJoin);
-		p.strokePath(path, pen);
+		p.strokePath(sh.all, pen);
 	}
-	p.fillPath(path, s.color);
+	for (const auto &f : sh.fills)
+		p.fillPath(f.second, f.first);
 	p.restore();
-	return textRect;
+	return sh.textRect;
+}
+} // namespace
+
+QRectF paintSubtitle(QPainter &p, const QRectF &canvas, const Subtitle &s, double alpha)
+{
+	if (s.text.trimmed().isEmpty() || canvas.height() <= 0)
+		return {};
+	return drawShape(p, buildShape(canvas, s), s, alpha);
+}
+
+QImage renderSubtitleImage(const Subtitle &s, int W, int H, QPoint *topLeft)
+{
+	if (s.text.trimmed().isEmpty() || W <= 0 || H <= 0)
+		return {};
+	const QRectF canvas(0, 0, W, H);
+	const SubtitleShape sh = buildShape(canvas, s);
+	// 테두리·그림자·박스까지 들어가는 영역
+	const double k = sh.k;
+	double margin = 4 + s.outlineWidth * k + (s.shadow ? 3 * k : 0);
+	if (s.box)
+		margin = std::max(margin, s.size * k * 0.3 + 2);
+	QRectF area = sh.all.boundingRect().united(sh.textRect).adjusted(-margin, -margin, margin, margin);
+	const QRect r = area.toAlignedRect().intersected(QRect(0, 0, W, H));
+	if (r.isEmpty())
+		return {};
+	QImage img(r.size(), QImage::Format_ARGB32_Premultiplied);
+	img.fill(Qt::transparent);
+	QPainter p(&img);
+	p.translate(-r.topLeft());
+	drawShape(p, sh, s, 1.0);
+	p.end();
+	if (topLeft)
+		*topLeft = r.topLeft();
+	return img;
 }
 
 QJsonObject subtitleStyleToJson(const Subtitle &s)
 {
 	return QJsonObject{{"font", s.font},       {"size", s.size},         {"color", s.color.name()},
 			   {"outline", s.outline.name()}, {"ow", s.outlineWidth}, {"shadow", s.shadow},
-			   {"box", s.box},          {"fade", s.fade},         {"y", s.posY}};
+			   {"box", s.box},          {"fade", s.fade},         {"y", s.posY},
+			   {"combo", s.combo}};
 }
 
 void subtitleStyleFromJson(const QJsonObject &o, Subtitle *s)
@@ -145,6 +229,7 @@ void subtitleStyleFromJson(const QJsonObject &o, Subtitle *s)
 	s->box = o["box"].toBool(false);
 	s->fade = o["fade"].toBool(true);
 	s->posY = o["y"].toDouble(0.9);
+	s->combo = o.contains("combo") ? o["combo"].toString() : ComboColors::defaultPresetName();
 }
 
 QJsonArray subtitlesToJson(const QVector<Subtitle> &subs)
