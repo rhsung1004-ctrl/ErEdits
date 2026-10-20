@@ -1,6 +1,8 @@
 #include "MainWindow.h"
 
+#include "EditTimeline.h"
 #include "RoiDialog.h"
+#include "Thumbs.h"
 #include "SubtitlePanel.h"
 #include "TimelineBar.h"
 #include "VideoView.h"
@@ -34,6 +36,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QSettings>
+#include <QShortcut>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStandardPaths>
@@ -74,6 +77,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 
 	m_scanner = new KillScanner(this);
 	m_rankReader = new RankReader(this);
+	m_verifier = new KillVerifier(this);
+	m_thumbs = new Thumbs(this);
 	m_exporter = new Exporter(this);
 	buildUi();
 
@@ -95,6 +100,28 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 	connect(m_scanner, &KillScanner::finished, this, &MainWindow::onScanFinished);
 	connect(m_scanner, &KillScanner::resultFound, this, [this](const ResultCandidate &c) { m_cands.push_back(c); });
 
+	connect(m_verifier, &KillVerifier::progress, this, [this](int done, int total) {
+		m_scanStatus->setText(QString("킬 숫자 확인 중… %1 / %2 (킬 전·후 화면의 TK·K·A 숫자를 직접 읽어 봐요)")
+					      .arg(done)
+					      .arg(total));
+	});
+	connect(m_verifier, &KillVerifier::finished, this, [this](const QVector<KillEvent> &ev) {
+		m_events = ev;
+		setBusy(false, false);
+		const auto n = [&](int c) {
+			return int(std::count_if(m_events.begin(), m_events.end(), [c](const KillEvent &e) { return e.check == c; }));
+		};
+		QString t = QString("<b>분석 끝</b> · 킬 숫자 확인: 확인됨 %1 · 잘못 잡힌 킬 %2개 뺌 · 못 읽음 %3")
+				    .arg(n(KillEvent::Confirmed))
+				    .arg(n(KillEvent::Rejected))
+				    .arg(n(KillEvent::Unreadable));
+		m_scanStatus->setText(t);
+		rebuildGames(false);
+		rebuildSegments(!m_edited);
+		saveCache();
+		if (!m_cands.isEmpty() && !m_readsDone)
+			startRankRead();
+	});
 	connect(m_rankReader, &RankReader::progress, this, [this](int done, int total) {
 		m_rankStatus->setText(QString("결과 화면에서 등수 읽는 중… %1 / %2").arg(done).arg(total));
 	});
@@ -187,6 +214,59 @@ void MainWindow::buildUi()
 	ll->addWidget(m_view, 1);
 	ll->addWidget(m_timeline);
 	ll->addWidget(legend);
+
+	// ── 편집 타임라인 (결과 영상) ──
+	m_editTl = new EditTimeline;
+	m_editTl->setThumbs(m_thumbs);
+	m_editTl->setData(&m_segs, &m_events, 0);
+	auto *bSplit = smallButton("✂ 자르기 (S)", "재생 위치에서 클립을 둘로 나눠요. 필요 없는 쪽을 골라 삭제하면 컷 편집");
+	bSplit->setShortcut(QKeySequence(Qt::Key_S));
+	auto *bCut = smallButton("🗑 클립 삭제 (Del)", "선택한 클립을 결과 영상에서 빼요");
+	bCut->setShortcut(QKeySequence::Delete);
+	m_btnUndo = smallButton("↶ 되돌리기", "Ctrl+Z");
+	m_btnUndo->setShortcut(QKeySequence::Undo);
+	m_btnRedo = smallButton("↷ 다시", "Ctrl+Y / Ctrl+Shift+Z");
+	m_btnRedo->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Y));
+	connect(new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z), this), &QShortcut::activated, this, &MainWindow::redo);
+	auto *bFit = smallButton("전체 보기", "편집 타임라인을 한 화면에 (Ctrl+휠로 확대)");
+	m_resultOnly = new QCheckBox("결과만 이어서 재생");
+	m_resultOnly->setToolTip("켜면 재생할 때 클립 사이(잘린 부분)를 건너뛰어 결과 영상처럼 이어서 보여 줘요.\n"
+				 "편집 타임라인을 누르면 켜지고, 위의 원본 막대를 누르면 꺼져요");
+	auto *editLabel = new QLabel("<b>편집</b> <span style='color:#888'>(결과 영상 순서 · 클립 끝을 끌어 길이 조절)</span>");
+	auto *er = new QHBoxLayout;
+	er->addWidget(editLabel);
+	er->addStretch(1);
+	er->addWidget(m_resultOnly);
+	er->addWidget(bSplit);
+	er->addWidget(bCut);
+	er->addWidget(m_btnUndo);
+	er->addWidget(m_btnRedo);
+	er->addWidget(bFit);
+	ll->addLayout(er);
+	ll->addWidget(m_editTl);
+
+	connect(bSplit, &QPushButton::clicked, this, &MainWindow::splitAtPlayhead);
+	connect(bCut, &QPushButton::clicked, this, &MainWindow::deleteSelected);
+	connect(m_btnUndo, &QPushButton::clicked, this, &MainWindow::undo);
+	connect(m_btnRedo, &QPushButton::clicked, this, &MainWindow::redo);
+	connect(bFit, &QPushButton::clicked, m_editTl, &EditTimeline::zoomToFit);
+	connect(m_editTl, &EditTimeline::seekRequested, this, [this](double t) {
+		m_resultOnly->setChecked(true);
+		m_playEnd = -1;
+		m_player->setPosition(qint64(t * 1000));
+	});
+	connect(m_editTl, &EditTimeline::segmentSelected, this, [this](int i) {
+		selectSegment(i);
+		m_timeline->setSelected(i);
+	});
+	connect(m_editTl, &EditTimeline::editStarted, this, &MainWindow::pushUndo);
+	connect(m_editTl, &EditTimeline::segmentsEdited, this, [this] {
+		recountSegments();
+		m_edited = true;
+		refreshTable();
+		saveCache();
+	});
+	connect(m_thumbs, &Thumbs::updated, m_editTl, qOverload<>(&QWidget::update));
 	ll->addLayout(ctrl);
 
 	// ── 오른쪽: 1. 킬 찾기 ──
@@ -215,7 +295,11 @@ void MainWindow::buildUi()
 	f1->addRow("분석 방식", m_scanMode);
 	auto *l1 = new QVBoxLayout(g1);
 	l1->addLayout(f1);
-	l1->addWidget(m_btnScan);
+	m_btnVerify = smallButton("킬 숫자 다시 확인", "찾은 킬마다 전·후 화면의 TK·K·A 숫자를 읽어 실제로 올라갔는지 확인해요 (영상 전체를 다시 훑지 않음)");
+	auto *scanRow = new QHBoxLayout;
+	scanRow->addWidget(m_btnScan, 1);
+	scanRow->addWidget(m_btnVerify);
+	l1->addLayout(scanRow);
 	l1->addWidget(m_scanProgress);
 	l1->addWidget(m_scanStatus);
 
@@ -223,8 +307,8 @@ void MainWindow::buildUi()
 	auto *g2 = new QWidget;
 	m_before = spin(0, 60, 1, st.value("before", 10).toDouble(), " 초");
 	m_after = spin(0, 60, 1, st.value("after", 5).toDouble(), " 초");
-	m_gap = spin(0, 30, 1, st.value("gap", 3).toDouble(), " 초");
-	m_gap->setToolTip("두 클립 사이가 이 시간보다 가까우면 한 클립으로 합쳐요 (연속 킬)");
+	m_gap = spin(0, 120, 1, st.value("chainGap", 20).toDouble(), " 초");
+	m_gap->setToolTip("킬·어시 뒤 이 시간 안에 다음 킬·어시가 나오면 그 부분까지 한 클립으로 이어 붙여요");
 	m_assist = new QCheckBox("어시스트만 한 장면도 포함");
 	m_assist->setChecked(st.value("assist", false).toBool());
 	m_btnRebuild = smallButton("다시 만들기", "지금 설정으로 클립을 처음부터 다시 만듦 (직접 고친 내용은 사라짐)");
@@ -237,7 +321,7 @@ void MainWindow::buildUi()
 	pr->addWidget(new QLabel("후까지"));
 	pr->addStretch(1);
 	auto *pr2 = new QHBoxLayout;
-	pr2->addWidget(new QLabel("합치기 간격"));
+	pr2->addWidget(new QLabel("연속 킬 묶기"));
 	pr2->addWidget(m_gap);
 	pr2->addWidget(m_assist);
 	pr2->addStretch(1);
@@ -264,8 +348,7 @@ void MainWindow::buildUi()
 	auto *bEndHere = smallButton("끝 = 현재 위치", "재생 위치를 이 클립의 끝으로");
 	auto *bPlaySeg = smallButton("▶ 클립 재생");
 	auto *bAdd = smallButton("＋ 여기에 클립 추가", "놓친 장면을 직접 추가 (재생 위치 앞뒤로 킬 전/후 설정만큼)");
-	auto *bDel = smallButton("🗑 삭제");
-	bDel->setShortcut(QKeySequence::Delete);
+	auto *bDel = smallButton("🗑 삭제", "선택한 클립 삭제 (Delete)");
 
 	auto *er1 = new QHBoxLayout;
 	er1->addWidget(bStartM);
@@ -365,11 +448,17 @@ void MainWindow::buildUi()
 	connect(btnOpen, &QPushButton::clicked, this, &MainWindow::chooseVideo);
 	connect(btnRoi, &QPushButton::clicked, this, &MainWindow::chooseRoi);
 	connect(m_btnScan, &QPushButton::clicked, this, [this] {
-		if (m_scanner->isRunning())
+		if (m_scanner->isRunning()) {
 			m_scanner->cancel();
-		else
+		} else if (m_verifier->isRunning()) {
+			m_verifier->cancel();
+			setBusy(false, false);
+			m_scanStatus->setText("킬 숫자 확인을 멈췄어요. 확인 안 한 킬은 숫자 모양 변화만으로 판단해요.");
+		} else {
 			startScan();
+		}
 	});
+	connect(m_btnVerify, &QPushButton::clicked, this, &MainWindow::startVerify);
 	connect(m_scanMode, &QComboBox::currentIndexChanged, this,
 		[](int i) { QSettings().setValue("scanMode", i); });
 
@@ -377,7 +466,7 @@ void MainWindow::buildUi()
 		QSettings s;
 		s.setValue("before", m_before->value());
 		s.setValue("after", m_after->value());
-		s.setValue("gap", m_gap->value());
+		s.setValue("chainGap", m_gap->value());
 		s.setValue("assist", m_assist->isChecked());
 		rebuildSegments(false);
 	};
@@ -390,6 +479,7 @@ void MainWindow::buildUi()
 						      "직접 고친 클립(길이 조정·추가·삭제)이 사라지고 지금 설정으로 "
 						      "다시 만들어요. 계속할까요?") != QMessageBox::Yes)
 			return;
+		pushUndo();
 		rebuildSegments(true);
 	});
 
@@ -418,14 +508,18 @@ void MainWindow::buildUi()
 
 	connect(m_table, &QTableWidget::itemSelectionChanged, this, [this] {
 		m_timeline->setSelected(currentSegment());
+		m_editTl->setSelected(currentSegment());
 	});
 	connect(m_table, &QTableWidget::cellDoubleClicked, this, [this](int row, int) { playSegment(row); });
 	connect(m_table, &QTableWidget::itemChanged, this, [this](QTableWidgetItem *it) {
 		if (m_fillingTable || it->column() != 0 || it->row() >= m_segs.size())
 			return;
+		pushUndo();
 		m_segs[it->row()].enabled = it->checkState() == Qt::Checked;
 		m_edited = true;
 		m_timeline->setData(m_segs, m_events, m_assist->isChecked());
+		m_editTl->refresh();
+		requestThumbs();
 		refreshSummary();
 		saveCache();
 	});
@@ -454,15 +548,28 @@ void MainWindow::buildUi()
 	connect(m_player, &QMediaPlayer::positionChanged, this, [this](qint64 ms) {
 		const double t = ms / 1000.0;
 		m_timeline->setPosition(t);
+		m_editTl->setSourcePosition(t);
 		m_view->setTime(t);
 		m_subPanel->setPlayhead(t);
 		m_posLabel->setText(formatTime(t) + " / " + formatTime(m_info.duration, false));
 		if (m_playEnd >= 0 && t >= m_playEnd) {
 			m_player->pause();
 			m_playEnd = -1;
+		} else if (m_playEnd < 0 && m_resultOnly->isChecked() &&
+			   m_player->playbackState() == QMediaPlayer::PlayingState && m_editTl->segmentAtSource(t) < 0) {
+			// 결과만 재생: 클립 밖이면 다음 클립 시작으로 건너뜀, 마지막 클립 뒤면 멈춤
+			const Segment *next = nullptr;
+			for (const Segment &sg : m_segs)
+				if (sg.enabled && sg.start > t - 0.05 && (!next || sg.start < next->start))
+					next = &sg;
+			if (next)
+				m_player->setPosition(qint64(next->start * 1000) + 1);
+			else
+				m_player->pause();
 		}
 	});
 	connect(m_timeline, &TimelineBar::seekRequested, this, [this](double t) {
+		m_resultOnly->setChecked(false);
 		m_playEnd = -1;
 		m_player->setPosition(qint64(t * 1000));
 	});
@@ -523,7 +630,7 @@ void MainWindow::chooseVideo()
 
 void MainWindow::openVideo(const QString &path)
 {
-	if (m_scanner->isRunning() || m_exporter->isRunning() || m_rankReader->isRunning()) {
+	if (m_scanner->isRunning() || m_exporter->isRunning() || m_rankReader->isRunning() || m_verifier->isRunning()) {
 		QMessageBox::information(this, "작업 중", "분석이나 내보내기가 끝난 뒤에 다른 영상을 열 수 있어요.");
 		return;
 	}
@@ -538,6 +645,7 @@ void MainWindow::openVideo(const QString &path)
 	m_path = path;
 	m_info = info;
 	m_rankReader->cancel();
+	m_verifier->cancel();
 	m_events.clear();
 	m_segs.clear();
 	m_cands.clear();
@@ -571,6 +679,11 @@ void MainWindow::openVideo(const QString &path)
 				     .arg(info.hasAudio ? "" : " · 소리 없음"));
 	m_timeline->setDuration(info.duration);
 	m_timeline->setScanned(0);
+	m_thumbs->setVideo(path);
+	m_editTl->setData(&m_segs, &m_events, info.duration);
+	m_editTl->zoomToFit();
+	m_undo.clear();
+	m_redo.clear();
 	m_player->setSource(QUrl::fromLocalFile(path));
 	m_player->pause();
 
@@ -614,6 +727,7 @@ void MainWindow::closeEvent(QCloseEvent *e)
 		return;
 	}
 	m_scanner->cancel();
+	m_verifier->cancel();
 	m_rankReader->cancel();
 	m_exporter->cancel();
 	saveCache();
@@ -671,6 +785,7 @@ void MainWindow::startScan()
 			return;
 	}
 	m_rankReader->cancel();
+	m_verifier->cancel();
 	m_events.clear();
 	m_segs.clear();
 	m_cands.clear();
@@ -713,11 +828,23 @@ void MainWindow::onScanFinished(bool ok, const QString &msg)
 	if (!m_edited)
 		rebuildSegments(true);
 	saveCache();
-	// 결과 화면 후보에서 등수 읽기 (멈춘 경우에도 그때까지 찾은 만큼)
-	if (!m_cands.isEmpty())
+	// 킬 숫자 확인 → 결과 화면 후보에서 등수 읽기 (멈춘 경우에도 그때까지 찾은 만큼)
+	if (!m_events.isEmpty())
+		startVerify();
+	else if (!m_cands.isEmpty())
 		startRankRead();
 	else
 		rebuildGames();
+}
+
+void MainWindow::startVerify()
+{
+	if (m_path.isEmpty() || m_events.isEmpty() || m_scanner->isRunning())
+		return;
+	m_rankReader->cancel();
+	m_scanStatus->setText("킬 숫자 확인 중…");
+	m_verifier->start(m_path, m_roi, m_events);
+	setBusy(false, false);
 }
 
 // ───────────────────────── 클립 ─────────────────────────
@@ -727,7 +854,7 @@ SegmentParams MainWindow::params() const
 	SegmentParams p;
 	p.before = m_before->value();
 	p.after = m_after->value();
-	p.mergeGap = m_gap->value();
+	p.chainGap = m_gap->value();
 	p.includeAssist = m_assist->isChecked();
 	return p;
 }
@@ -772,6 +899,10 @@ void MainWindow::refreshTable()
 	if (keep >= 0 && keep < m_segs.size())
 		m_table->selectRow(keep);
 	m_timeline->setData(m_segs, m_events, m_assist->isChecked());
+	m_editTl->refresh();
+	requestThumbs();
+	m_btnUndo->setEnabled(!m_undo.isEmpty());
+	m_btnRedo->setEnabled(!m_redo.isEmpty());
 	m_subPanel->refreshMarks();
 	refreshSummary();
 }
@@ -821,6 +952,7 @@ void MainWindow::adjustSelected(bool startSide, double delta, bool toPlayhead)
 	const int i = currentSegment();
 	if (i < 0 || i >= m_segs.size())
 		return;
+	pushUndo();
 	Segment &s = m_segs[i];
 	const double here = m_player->position() / 1000.0;
 	if (startSide) {
@@ -830,6 +962,7 @@ void MainWindow::adjustSelected(bool startSide, double delta, bool toPlayhead)
 		const double v = toPlayhead ? here : s.end + delta;
 		s.end = std::clamp(v, s.start + 0.5, m_info.duration);
 	}
+	recountSegments();
 	m_edited = true;
 	refreshTable();
 	saveCache();
@@ -849,10 +982,12 @@ void MainWindow::addSegmentAtPlayhead()
 	if (s.end - s.start < 0.5)
 		return;
 	s.manual = true;
+	pushUndo();
 	auto it = std::lower_bound(m_segs.begin(), m_segs.end(), s,
 				   [](const Segment &a, const Segment &b) { return a.start < b.start; });
 	const int idx = int(it - m_segs.begin());
 	m_segs.insert(it, s);
+	recountSegments();
 	m_edited = true;
 	refreshTable();
 	selectSegment(idx);
@@ -864,6 +999,7 @@ void MainWindow::deleteSelected()
 	const int i = currentSegment();
 	if (i < 0 || i >= m_segs.size())
 		return;
+	pushUndo();
 	m_segs.removeAt(i);
 	m_edited = true;
 	refreshTable();
@@ -892,7 +1028,7 @@ void MainWindow::startExport()
 		QMessageBox::information(this, "내보내기", "내보낼 클립이 없어요. 먼저 킬을 찾아 주세요.");
 		return;
 	}
-	if (m_scanner->isRunning() || m_rankReader->isRunning()) {
+	if (m_scanner->isRunning() || m_rankReader->isRunning() || m_verifier->isRunning()) {
 		QMessageBox::information(this, "내보내기", "분석(등수 읽기 포함)이 끝난 뒤에 내보낼 수 있어요.");
 		return;
 	}
@@ -928,11 +1064,13 @@ void MainWindow::startExport()
 void MainWindow::setBusy(bool scanning, bool exporting)
 {
 	const bool hasVideo = !m_path.isEmpty();
-	m_btnScan->setText(scanning ? "⏹ 분석 멈추기" : "🔍 킬 찾기 시작");
+	const bool verifying = m_verifier->isRunning();
+	m_btnScan->setText(scanning || verifying ? "⏹ 분석 멈추기" : "🔍 킬 찾기 시작");
 	m_btnScan->setEnabled(hasVideo && !exporting);
 	m_scanMode->setEnabled(!scanning);
 	m_btnExport->setText(exporting ? "⏹ 내보내기 멈추기" : "💾 영상 내보내기…");
-	m_btnExport->setEnabled(hasVideo && !scanning);
+	m_btnExport->setEnabled(hasVideo && !scanning && !verifying);
+	m_btnVerify->setEnabled(hasVideo && !scanning && !exporting && !verifying && !m_events.isEmpty());
 	m_btnRebuild->setEnabled(!scanning && !exporting);
 	const bool reading = m_rankReader->isRunning();
 	m_btnReadRanks->setEnabled(hasVideo && !scanning && !exporting && !reading && !m_cands.isEmpty());
@@ -1269,4 +1407,82 @@ void MainWindow::saveGameLog()
 		   << (keepGame(g, flt) ? "남김" : "뺌") << "," << q(g.evidence) << "\n";
 	}
 	m_rankStatus->setText("판별 기록을 저장했어요: " + QDir::toNativeSeparators(out));
+}
+
+// ───────────────────────── 컷 편집 ─────────────────────────
+
+void MainWindow::pushUndo()
+{
+	m_undo.push_back(m_segs);
+	if (m_undo.size() > 100)
+		m_undo.removeFirst();
+	m_redo.clear();
+	m_btnUndo->setEnabled(true);
+	m_btnRedo->setEnabled(false);
+}
+
+void MainWindow::undo()
+{
+	if (m_undo.isEmpty())
+		return;
+	m_redo.push_back(m_segs);
+	m_segs = m_undo.takeLast();
+	m_edited = true;
+	refreshTable();
+	saveCache();
+}
+
+void MainWindow::redo()
+{
+	if (m_redo.isEmpty())
+		return;
+	m_undo.push_back(m_segs);
+	m_segs = m_redo.takeLast();
+	m_edited = true;
+	refreshTable();
+	saveCache();
+}
+
+void MainWindow::recountSegments()
+{
+	for (Segment &s : m_segs) {
+		s.kills = s.assists = 0;
+		for (const KillEvent &e : m_events) {
+			if (!e.counts() || e.time < s.start || e.time > s.end)
+				continue;
+			if (e.kill)
+				s.kills += std::max(1, e.kills);
+			else
+				s.assists += std::max(1, e.assists);
+		}
+	}
+}
+
+void MainWindow::splitAtPlayhead()
+{
+	const double t = m_player->position() / 1000.0;
+	const int i = m_editTl->segmentAtSource(t);
+	if (i < 0) {
+		m_summary->setText("<span style='color:#e9a'>자를 위치가 클립 안에 있어야 해요. 편집 타임라인에서 자를 곳을 누른 뒤 S</span>");
+		return;
+	}
+	if (t - m_segs[i].start < 0.3 || m_segs[i].end - t < 0.3)
+		return; // 끝에 너무 가까움
+	pushUndo();
+	Segment back = m_segs[i];
+	back.start = t;
+	m_segs[i].end = t;
+	m_segs.insert(i + 1, back);
+	recountSegments();
+	m_edited = true;
+	refreshTable();
+	selectSegment(i + 1);
+	saveCache();
+}
+
+void MainWindow::requestThumbs()
+{
+	for (const Segment &s : m_segs)
+		if (s.enabled)
+			m_thumbs->request(std::max(0.0, s.start - 8), std::min(m_info.duration, s.end + 8));
 }

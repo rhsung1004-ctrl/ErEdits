@@ -370,6 +370,121 @@ Reading readRank(const uint8_t *rgb)
 	return best;
 }
 
+// ───────────────────────── 킬 숫자 줄 읽기 ─────────────────────────
+
+namespace {
+// 붙어 버린 숫자(예: "12")를 가운데 가장 얇은 세로줄에서 나눔
+void splitWide(const Comp &c, std::vector<Comp> *out, int depth = 0)
+{
+	const int w = c.b.w(), h = c.b.h();
+	if (w < 0.95 * h || depth > 2) {
+		out->push_back(c);
+		return;
+	}
+	const int lo = int(0.3 * w), hi = std::max(lo + 1, int(0.7 * w));
+	int bestX = lo, bestN = h + 1;
+	for (int x = lo; x < hi; ++x) {
+		int n = 0;
+		for (int y = 0; y < h; ++y)
+			n += c.mask[size_t(y * w + x)];
+		if (n < bestN) {
+			bestN = n;
+			bestX = x;
+		}
+	}
+	for (int part = 0; part < 2; ++part) {
+		const int a = part == 0 ? 0 : bestX, b = part == 0 ? bestX : w;
+		int x0 = b, x1 = a - 1, y0 = h, y1 = -1;
+		for (int y = 0; y < h; ++y)
+			for (int x = a; x < b; ++x)
+				if (c.mask[size_t(y * w + x)]) {
+					x0 = std::min(x0, x);
+					x1 = std::max(x1, x);
+					y0 = std::min(y0, y);
+					y1 = std::max(y1, y);
+				}
+		if (x1 < x0)
+			continue;
+		Comp p;
+		p.b = Box{c.b.x0 + x0, c.b.y0 + y0, c.b.x0 + x1 + 1, c.b.y0 + y1 + 1};
+		p.mask.assign(size_t(p.b.w() * p.b.h()), 0);
+		for (int y = y0; y <= y1; ++y)
+			for (int x = x0; x <= x1; ++x)
+				if (c.mask[size_t(y * w + x)]) {
+					p.mask[size_t((y - y0) * p.b.w() + (x - x0))] = 1;
+					++p.count;
+				}
+		splitWide(p, out, depth + 1);
+	}
+}
+} // namespace
+
+bool readHudCounts(const uint8_t *rgb, int w, int h, int counts[3], bool *weak)
+{
+	if (w <= 0 || h <= 0)
+		return false;
+	// 흰 숫자만 (TK·K·A 글자는 회색, RP 숫자는 노란색이라 빠짐)
+	int hist[256] = {};
+	for (int i = 0; i < w * h; ++i)
+		++hist[(rgb[i * 3] + rgb[i * 3 + 1] + rgb[i * 3 + 2]) / 3];
+	int acc = 0, p997 = 255;
+	for (int v = 255; v >= 0; --v) {
+		acc += hist[v];
+		if (acc >= w * h * 0.003) {
+			p997 = v;
+			break;
+		}
+	}
+	const int thr = std::max(150, int(0.72 * p997));
+	std::vector<uint8_t> m(size_t(w * h), 0);
+	for (int i = 0; i < w * h; ++i) {
+		const uint8_t *p = rgb + size_t(i) * 3;
+		const int lum = (p[0] + p[1] + p[2]) / 3;
+		const int sat = std::max({p[0], p[1], p[2]}) - std::min({p[0], p[1], p[2]});
+		m[size_t(i)] = lum > thr && sat < 70;
+	}
+	const auto all = components(m, w, h, 20);
+	int H = 0;
+	for (const Comp &c : all)
+		H = std::max(H, c.b.h());
+	if (H < 12)
+		return false;
+	std::vector<Comp> cs;
+	for (const Comp &c : all)
+		if (c.b.h() >= 0.7 * H)
+			splitWide(c, &cs);
+	std::sort(cs.begin(), cs.end(), [](const Comp &a, const Comp &b) { return a.b.x0 < b.b.x0; });
+	// 숫자끼리 가까우면 한 수 ("12"), 띄어져 있으면 다른 수
+	std::vector<std::vector<const Comp *>> groups;
+	for (const Comp &c : cs) {
+		if (!groups.empty() && c.b.x0 - groups.back().back()->b.x1 < 0.45 * H)
+			groups.back().push_back(&c);
+		else
+			groups.push_back({&c});
+	}
+	if (groups.size() < 3)
+		return false;
+	bool anyWeak = false;
+	for (int i = 0; i < 3; ++i) {
+		const auto &g = groups[groups.size() - 3 + size_t(i)];
+		if (g.size() > 2)
+			return false;
+		int v = 0;
+		for (const Comp *c : g) {
+			double d = 0, mg = 0;
+			const int digit = classifyDigit(c->mask, c->b.w(), c->b.h(), &d, &mg);
+			if (digit < 0 || d > 3.0)
+				return false;
+			anyWeak = anyWeak || d >= 2.0 || mg < 0.3;
+			v = v * 10 + digit;
+		}
+		counts[i] = v;
+	}
+	if (weak)
+		*weak = anyWeak;
+	return true;
+}
+
 // ───────────────────────── 숫자 알아보기 ─────────────────────────
 
 int classifyDigit(const std::vector<uint8_t> &mask, int w, int h, double *distance, double *margin)

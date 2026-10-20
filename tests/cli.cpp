@@ -1,11 +1,13 @@
 // 화면 없이 엔진만 검사하는 도구
 //   erkillcut_cli scan <영상> [fast] [x y w h]
-//   erkillcut_cli rank <영상> [최대등수] [fast]       — 킬 + 결과 화면 찾기 → 등수 읽기 → 판별 결과
+//   erkillcut_cli rank <영상> [최대등수] [fast]       — 킬 + 결과 화면 찾기 → 킬 숫자 확인 → 등수 읽기 → 판별 결과
+//   erkillcut_cli readhud <그림> [그림 ...]            — 킬 숫자 줄(TK·K·A)만 잘라 낸 그림에서 숫자 읽기
 //   erkillcut_cli readframe <그림> [그림 ...]          — 결과 화면 캡처 한 장에서 등수 읽기
 //   erkillcut_cli export <영상> <결과.mp4> <시작-끝,시작-끝,...> [크로스페이드] [페이드인] [페이드아웃] ["시작-끝|글자;..." [글꼴파일]]
 #include "Exporter.h"
 #include "Games.h"
 #include "KillScanner.h"
+#include "KillVerifier.h"
 #include "RankReader.h"
 #include "Util.h"
 
@@ -28,6 +30,22 @@ int main(int argc, char *argv[])
 		out << "usage: scan <video> [fast] [x y w h] | export <video> <out> <s-e,...> [xfade fin fout]\n";
 		return 2;
 	}
+	if (a[1] == "readhud") { // 킬 숫자 줄만 잘라 낸 그림
+		for (int i = 2; i < a.size(); ++i) {
+			const int W = HudKillWatcher::kW * rank::kHudScale, H = HudKillWatcher::kH * rank::kHudScale;
+			const QImage img = QImage(a[i]).convertToFormat(QImage::Format_RGB888).scaled(W, H, Qt::IgnoreAspectRatio,
+												      Qt::SmoothTransformation);
+			std::vector<uint8_t> rgb(size_t(W) * H * 3);
+			for (int y = 0; y < H; ++y)
+				memcpy(&rgb[size_t(y) * W * 3], img.constScanLine(y), size_t(W) * 3);
+			int v[3] = {};
+			bool weak = true;
+			const bool ok = rank::readHudCounts(rgb.data(), W, H, v, &weak);
+			out << a[i] << " ok=" << ok << " TK " << v[0] << " K " << v[1] << " A " << v[2] << " weak=" << weak << "\n";
+		}
+		return 0;
+	}
+
 	if (a[1] == "readframe") {
 		for (int i = 2; i < a.size(); ++i) {
 			const QImage img = QImage(a[i]).convertToFormat(QImage::Format_RGB888).scaled(
@@ -89,6 +107,7 @@ int main(int argc, char *argv[])
 		const QRectF roi = defaultKillRoi(info.width, info.height);
 		const QRectF game(0, 0, 1, 1);
 		KillScanner sc;
+		KillVerifier kv;
 		RankReader rd;
 		QVector<KillEvent> events;
 		QVector<ResultCandidate> cands;
@@ -102,6 +121,15 @@ int main(int argc, char *argv[])
 		});
 		QObject::connect(&sc, &KillScanner::finished, [&](bool ok, const QString &msg) {
 			out << "scan finished ok=" << ok << " " << msg << "\n";
+			out.flush();
+			kv.start(a[2], roi, events);
+		});
+		QObject::connect(&kv, &KillVerifier::finished, [&](const QVector<KillEvent> &ev) {
+			events = ev;
+			static const char *names[] = {"미확인", "확인됨", "잘못 잡힘", "못 읽음"};
+			for (const KillEvent &e : events)
+				out << "verify t=" << formatTime(e.time) << " " << names[e.check] << " kill=" << e.kill << "x" << e.kills
+				    << " assist=" << e.assist << "\n";
 			out.flush();
 			rd.start(a[2], game, cands);
 		});

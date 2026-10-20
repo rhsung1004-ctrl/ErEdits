@@ -3,6 +3,7 @@
 #include "Exporter.h"
 #include "Games.h"
 #include "KillScanner.h"
+#include "KillVerifier.h"
 #include "RankReader.h"
 #include "Segments.h"
 #include "Util.h"
@@ -22,6 +23,8 @@ class QSpinBox;
 class QTableWidget;
 class SubtitlePanel;
 class VideoView;
+class EditTimeline;
+class Thumbs;
 class TimelineBar;
 
 class MainWindow : public QMainWindow {
@@ -42,6 +45,7 @@ private:
 	void chooseRoi();
 	void startScan();
 	void onScanFinished(bool ok, const QString &msg);
+	void startVerify();
 	void rebuildSegments(bool force);
 	void refreshTable();
 	void refreshSummary();
@@ -67,6 +71,14 @@ private:
 	void refreshGameTable();
 	void gameFilterChanged();
 	void saveGameLog();
+
+	// 컷 편집
+	void pushUndo();
+	void undo();
+	void redo();
+	void recountSegments(); // 클립마다 안에 든 킬·어시 수 다시 세기
+	void splitAtPlayhead();
+	void requestThumbs();
 
 	// 분석 결과를 영상별로 저장 (몇 시간짜리를 다시 분석하지 않게)
 	QString cachePath() const;
@@ -95,6 +107,9 @@ private:
 
 	KillScanner *m_scanner;
 	RankReader *m_rankReader;
+	KillVerifier *m_verifier;
+	Thumbs *m_thumbs;
+	QVector<QVector<Segment>> m_undo, m_redo;
 	Exporter *m_exporter;
 
 	// 화면
@@ -103,6 +118,10 @@ private:
 	VideoView *m_view;
 	SubtitlePanel *m_subPanel;
 	TimelineBar *m_timeline;
+	EditTimeline *m_editTl;
+	QCheckBox *m_resultOnly;
+	QPushButton *m_btnUndo;
+	QPushButton *m_btnRedo;
 	QPushButton *m_btnPlay;
 	QLabel *m_posLabel;
 	QLabel *m_fileLabel;
@@ -110,6 +129,7 @@ private:
 	QLabel *m_roiLabel;
 	QComboBox *m_scanMode;
 	QPushButton *m_btnScan;
+	QPushButton *m_btnVerify;
 	QProgressBar *m_scanProgress;
 	QLabel *m_scanStatus;
 

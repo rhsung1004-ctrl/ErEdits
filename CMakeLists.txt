@@ -27,6 +27,9 @@ add_executable(ERKillCut WIN32
   src/ResultScreen.h    src/ResultScreen.cpp  src/DigitTemplates.inc
   src/Games.h           src/Games.cpp
   src/RankReader.h      src/RankReader.cpp
+  src/KillVerifier.h    src/KillVerifier.cpp
+  src/EditTimeline.h    src/EditTimeline.cpp
+  src/Thumbs.h          src/Thumbs.cpp
 )
 
 target_link_libraries(ERKillCut PRIVATE Qt6::Widgets Qt6::Multimedia)
@@ -42,7 +45,7 @@ if(ERKILLCUT_TESTS)
   add_executable(erkillcut_cli tests/cli.cpp
     src/HudKillWatcher.cpp src/KillScanner.cpp src/Segments.cpp src/Exporter.cpp src/Util.cpp
     src/FontManager.cpp src/Subtitles.cpp src/ComboColors.h src/ComboColors.cpp
-    src/ResultScreen.cpp src/Games.cpp src/RankReader.cpp)
+    src/ResultScreen.cpp src/Games.cpp src/RankReader.cpp src/KillVerifier.cpp)
   target_include_directories(erkillcut_cli PRIVATE src)
   target_link_libraries(erkillcut_cli PRIVATE Qt6::Gui)
 endif()

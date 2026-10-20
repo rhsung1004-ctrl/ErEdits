@@ -72,6 +72,11 @@ Reading readResultScreen(const uint8_t *rgb);
 Reading readRankPoint(const uint8_t *rgb);
 Reading readScoreboard(const uint8_t *rgb);
 
+// 킬 숫자 줄(TK·K·A)을 크게 잘라 낸 RGB(w x h)에서 세 숫자를 읽음 (킬 확인용)
+//  counts: TK, K, A. weak: 덜 확실한 숫자가 섞임. 못 읽으면 false
+constexpr int kHudScale = 6; // 킬 숫자 영역(160x32 기준)을 이 배수로 키워서 읽음
+bool readHudCounts(const uint8_t *rgb, int w, int h, int counts[3], bool *weak);
+
 // 숫자 하나 알아보기: mask 는 w x h (1 = 글자). 0~9, 못 알아보면 -1
 int classifyDigit(const std::vector<uint8_t> &mask, int w, int h, double *distance, double *margin);
 

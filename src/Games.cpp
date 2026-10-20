@@ -22,7 +22,7 @@ QVector<GameResult> buildGames(const QVector<ResultCandidate> &candsIn, const QV
 	// 후보 묶기: 가까이 이어진 결과 화면은 한 판. 사이에 킬이 있으면 무조건 다른 판 (결과 화면·대기실에선 킬이 없음)
 	auto killBetween = [&](double a, double b) {
 		for (const KillEvent &e : events)
-			if ((e.kill || e.assist) && e.time > a && e.time < b)
+			if (e.counts() && e.time > a && e.time < b)
 				return true;
 		return false;
 	};
@@ -91,7 +91,7 @@ QVector<GameResult> buildGames(const QVector<ResultCandidate> &candsIn, const QV
 	// 마지막 결과 화면 뒤에도 킬이 있으면 결과 없는 판
 	bool trailing = false;
 	for (const KillEvent &e : events)
-		if (e.time > prevEnd + kKillSlack)
+		if (e.counts() && e.time > prevEnd + kKillSlack)
 			trailing = true;
 	if (trailing) {
 		GameResult g;
@@ -103,11 +103,11 @@ QVector<GameResult> buildGames(const QVector<ResultCandidate> &candsIn, const QV
 	}
 
 	for (const KillEvent &e : events) {
-		if (!e.kill)
+		if (!e.kill || !e.counts())
 			continue;
 		const int i = gameIndexAt(games, e.time);
 		if (i >= 0)
-			++games[i].kills;
+			games[i].kills += std::max(1, e.kills);
 	}
 	return games;
 }
