@@ -24,6 +24,9 @@ add_executable(ERKillCut WIN32
   src/SubtitlePanel.h   src/SubtitlePanel.cpp
   src/ComboColors.h     src/ComboColors.cpp
   src/ComboDialog.h     src/ComboDialog.cpp
+  src/ResultScreen.h    src/ResultScreen.cpp  src/DigitTemplates.inc
+  src/Games.h           src/Games.cpp
+  src/RankReader.h      src/RankReader.cpp
 )
 
 target_link_libraries(ERKillCut PRIVATE Qt6::Widgets Qt6::Multimedia)
@@ -33,12 +36,13 @@ if(MSVC)
   target_compile_definitions(ERKillCut PRIVATE NOMINMAX)
 endif()
 
-# 테스트용: 화면 없이 킬 찾기·구간·필터 만들기 검사 (cmake -DERKILLCUT_TESTS=ON)
+# 테스트용: 화면 없이 킬 찾기·등수 판정·구간·필터 만들기 검사 (cmake -DERKILLCUT_TESTS=ON)
 option(ERKILLCUT_TESTS "명령줄 테스트 도구도 빌드" OFF)
 if(ERKILLCUT_TESTS)
   add_executable(erkillcut_cli tests/cli.cpp
     src/HudKillWatcher.cpp src/KillScanner.cpp src/Segments.cpp src/Exporter.cpp src/Util.cpp
-    src/FontManager.cpp src/Subtitles.cpp src/ComboColors.h src/ComboColors.cpp)
+    src/FontManager.cpp src/Subtitles.cpp src/ComboColors.h src/ComboColors.cpp
+    src/ResultScreen.cpp src/Games.cpp src/RankReader.cpp)
   target_include_directories(erkillcut_cli PRIVATE src)
   target_link_libraries(erkillcut_cli PRIVATE Qt6::Gui)
 endif()
