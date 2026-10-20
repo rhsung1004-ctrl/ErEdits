@@ -1,6 +1,8 @@
 #include "MainWindow.h"
 
+#include "EditTimeline.h"
 #include "RoiDialog.h"
+#include "Thumbs.h"
 #include "SubtitlePanel.h"
 #include "TimelineBar.h"
 #include "VideoView.h"
@@ -23,6 +25,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
@@ -33,11 +36,14 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QSettings>
+#include <QShortcut>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <QTabWidget>
+#include <QTextStream>
 
 #include <algorithm>
 #include <cmath>
@@ -70,6 +76,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 	resize(1500, 900);
 
 	m_scanner = new KillScanner(this);
+	m_rankReader = new RankReader(this);
+	m_verifier = new KillVerifier(this);
+	m_thumbs = new Thumbs(this);
 	m_exporter = new Exporter(this);
 	buildUi();
 
@@ -89,6 +98,40 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 			rebuildSegments(true);
 	});
 	connect(m_scanner, &KillScanner::finished, this, &MainWindow::onScanFinished);
+	connect(m_scanner, &KillScanner::resultFound, this, [this](const ResultCandidate &c) { m_cands.push_back(c); });
+
+	connect(m_verifier, &KillVerifier::progress, this, [this](int done, int total) {
+		m_scanStatus->setText(QString("킬 숫자 확인 중… %1 / %2 (킬 전·후 화면의 TK·K·A 숫자를 직접 읽어 봐요)")
+					      .arg(done)
+					      .arg(total));
+	});
+	connect(m_verifier, &KillVerifier::finished, this, [this](const QVector<KillEvent> &ev) {
+		m_events = ev;
+		setBusy(false, false);
+		const auto n = [&](int c) {
+			return int(std::count_if(m_events.begin(), m_events.end(), [c](const KillEvent &e) { return e.check == c; }));
+		};
+		QString t = QString("<b>분석 끝</b> · 킬 숫자 확인: 확인됨 %1 · 잘못 잡힌 킬 %2개 뺌 · 못 읽음 %3")
+				    .arg(n(KillEvent::Confirmed))
+				    .arg(n(KillEvent::Rejected))
+				    .arg(n(KillEvent::Unreadable));
+		m_scanStatus->setText(t);
+		rebuildGames(false);
+		rebuildSegments(!m_edited);
+		saveCache();
+		if (!m_cands.isEmpty() && !m_readsDone)
+			startRankRead();
+	});
+	connect(m_rankReader, &RankReader::progress, this, [this](int done, int total) {
+		m_rankStatus->setText(QString("결과 화면에서 등수 읽는 중… %1 / %2").arg(done).arg(total));
+	});
+	connect(m_rankReader, &RankReader::finished, this, [this](bool, const QVector<RankReading> &rs) {
+		m_readings = rs;
+		m_readsDone = true;
+		setBusy(false, false);
+		rebuildGames();
+		saveCache();
+	});
 
 	connect(m_exporter, &Exporter::progress, this,
 		[this](double f) { m_exportProgress->setValue(int(std::lround(f * 1000))); });
@@ -171,6 +214,59 @@ void MainWindow::buildUi()
 	ll->addWidget(m_view, 1);
 	ll->addWidget(m_timeline);
 	ll->addWidget(legend);
+
+	// ── 편집 타임라인 (결과 영상) ──
+	m_editTl = new EditTimeline;
+	m_editTl->setThumbs(m_thumbs);
+	m_editTl->setData(&m_segs, &m_events, 0);
+	auto *bSplit = smallButton("✂ 자르기 (S)", "재생 위치에서 클립을 둘로 나눠요. 필요 없는 쪽을 골라 삭제하면 컷 편집");
+	bSplit->setShortcut(QKeySequence(Qt::Key_S));
+	auto *bCut = smallButton("🗑 클립 삭제 (Del)", "선택한 클립을 결과 영상에서 빼요");
+	bCut->setShortcut(QKeySequence::Delete);
+	m_btnUndo = smallButton("↶ 되돌리기", "Ctrl+Z");
+	m_btnUndo->setShortcut(QKeySequence::Undo);
+	m_btnRedo = smallButton("↷ 다시", "Ctrl+Y / Ctrl+Shift+Z");
+	m_btnRedo->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Y));
+	connect(new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z), this), &QShortcut::activated, this, &MainWindow::redo);
+	auto *bFit = smallButton("전체 보기", "편집 타임라인을 한 화면에 (Ctrl+휠로 확대)");
+	m_resultOnly = new QCheckBox("결과만 이어서 재생");
+	m_resultOnly->setToolTip("켜면 재생할 때 클립 사이(잘린 부분)를 건너뛰어 결과 영상처럼 이어서 보여 줘요.\n"
+				 "편집 타임라인을 누르면 켜지고, 위의 원본 막대를 누르면 꺼져요");
+	auto *editLabel = new QLabel("<b>편집</b> <span style='color:#888'>(결과 영상 순서 · 클립 끝을 끌어 길이 조절)</span>");
+	auto *er = new QHBoxLayout;
+	er->addWidget(editLabel);
+	er->addStretch(1);
+	er->addWidget(m_resultOnly);
+	er->addWidget(bSplit);
+	er->addWidget(bCut);
+	er->addWidget(m_btnUndo);
+	er->addWidget(m_btnRedo);
+	er->addWidget(bFit);
+	ll->addLayout(er);
+	ll->addWidget(m_editTl);
+
+	connect(bSplit, &QPushButton::clicked, this, &MainWindow::splitAtPlayhead);
+	connect(bCut, &QPushButton::clicked, this, &MainWindow::deleteSelected);
+	connect(m_btnUndo, &QPushButton::clicked, this, &MainWindow::undo);
+	connect(m_btnRedo, &QPushButton::clicked, this, &MainWindow::redo);
+	connect(bFit, &QPushButton::clicked, m_editTl, &EditTimeline::zoomToFit);
+	connect(m_editTl, &EditTimeline::seekRequested, this, [this](double t) {
+		m_resultOnly->setChecked(true);
+		m_playEnd = -1;
+		m_player->setPosition(qint64(t * 1000));
+	});
+	connect(m_editTl, &EditTimeline::segmentSelected, this, [this](int i) {
+		selectSegment(i);
+		m_timeline->setSelected(i);
+	});
+	connect(m_editTl, &EditTimeline::editStarted, this, &MainWindow::pushUndo);
+	connect(m_editTl, &EditTimeline::segmentsEdited, this, [this] {
+		recountSegments();
+		m_edited = true;
+		refreshTable();
+		saveCache();
+	});
+	connect(m_thumbs, &Thumbs::updated, m_editTl, qOverload<>(&QWidget::update));
 	ll->addLayout(ctrl);
 
 	// ── 오른쪽: 1. 킬 찾기 ──
@@ -199,7 +295,11 @@ void MainWindow::buildUi()
 	f1->addRow("분석 방식", m_scanMode);
 	auto *l1 = new QVBoxLayout(g1);
 	l1->addLayout(f1);
-	l1->addWidget(m_btnScan);
+	m_btnVerify = smallButton("킬 숫자 다시 확인", "찾은 킬마다 전·후 화면의 TK·K·A 숫자를 읽어 실제로 올라갔는지 확인해요 (영상 전체를 다시 훑지 않음)");
+	auto *scanRow = new QHBoxLayout;
+	scanRow->addWidget(m_btnScan, 1);
+	scanRow->addWidget(m_btnVerify);
+	l1->addLayout(scanRow);
 	l1->addWidget(m_scanProgress);
 	l1->addWidget(m_scanStatus);
 
@@ -207,8 +307,8 @@ void MainWindow::buildUi()
 	auto *g2 = new QWidget;
 	m_before = spin(0, 60, 1, st.value("before", 10).toDouble(), " 초");
 	m_after = spin(0, 60, 1, st.value("after", 5).toDouble(), " 초");
-	m_gap = spin(0, 30, 1, st.value("gap", 3).toDouble(), " 초");
-	m_gap->setToolTip("두 클립 사이가 이 시간보다 가까우면 한 클립으로 합쳐요 (연속 킬)");
+	m_gap = spin(0, 120, 1, st.value("chainGap", 20).toDouble(), " 초");
+	m_gap->setToolTip("킬·어시 뒤 이 시간 안에 다음 킬·어시가 나오면 그 부분까지 한 클립으로 이어 붙여요");
 	m_assist = new QCheckBox("어시스트만 한 장면도 포함");
 	m_assist->setChecked(st.value("assist", false).toBool());
 	m_btnRebuild = smallButton("다시 만들기", "지금 설정으로 클립을 처음부터 다시 만듦 (직접 고친 내용은 사라짐)");
@@ -221,7 +321,7 @@ void MainWindow::buildUi()
 	pr->addWidget(new QLabel("후까지"));
 	pr->addStretch(1);
 	auto *pr2 = new QHBoxLayout;
-	pr2->addWidget(new QLabel("합치기 간격"));
+	pr2->addWidget(new QLabel("연속 킬 묶기"));
 	pr2->addWidget(m_gap);
 	pr2->addWidget(m_assist);
 	pr2->addStretch(1);
@@ -248,8 +348,7 @@ void MainWindow::buildUi()
 	auto *bEndHere = smallButton("끝 = 현재 위치", "재생 위치를 이 클립의 끝으로");
 	auto *bPlaySeg = smallButton("▶ 클립 재생");
 	auto *bAdd = smallButton("＋ 여기에 클립 추가", "놓친 장면을 직접 추가 (재생 위치 앞뒤로 킬 전/후 설정만큼)");
-	auto *bDel = smallButton("🗑 삭제");
-	bDel->setShortcut(QKeySequence::Delete);
+	auto *bDel = smallButton("🗑 삭제", "선택한 클립 삭제 (Delete)");
 
 	auto *er1 = new QHBoxLayout;
 	er1->addWidget(bStartM);
@@ -332,6 +431,7 @@ void MainWindow::buildUi()
 	m_subPanel = new SubtitlePanel;
 	auto *tabs = new QTabWidget;
 	tabs->addTab(g2, "2. 클립 (킬 장면만 남기기)");
+	tabs->addTab(buildRankTab(), "판 등수");
 	tabs->addTab(m_subPanel, "자막");
 	rl->addWidget(tabs, 1);
 	rl->addWidget(g3);
@@ -348,11 +448,17 @@ void MainWindow::buildUi()
 	connect(btnOpen, &QPushButton::clicked, this, &MainWindow::chooseVideo);
 	connect(btnRoi, &QPushButton::clicked, this, &MainWindow::chooseRoi);
 	connect(m_btnScan, &QPushButton::clicked, this, [this] {
-		if (m_scanner->isRunning())
+		if (m_scanner->isRunning()) {
 			m_scanner->cancel();
-		else
+		} else if (m_verifier->isRunning()) {
+			m_verifier->cancel();
+			setBusy(false, false);
+			m_scanStatus->setText("킬 숫자 확인을 멈췄어요. 확인 안 한 킬은 숫자 모양 변화만으로 판단해요.");
+		} else {
 			startScan();
+		}
 	});
+	connect(m_btnVerify, &QPushButton::clicked, this, &MainWindow::startVerify);
 	connect(m_scanMode, &QComboBox::currentIndexChanged, this,
 		[](int i) { QSettings().setValue("scanMode", i); });
 
@@ -360,7 +466,7 @@ void MainWindow::buildUi()
 		QSettings s;
 		s.setValue("before", m_before->value());
 		s.setValue("after", m_after->value());
-		s.setValue("gap", m_gap->value());
+		s.setValue("chainGap", m_gap->value());
 		s.setValue("assist", m_assist->isChecked());
 		rebuildSegments(false);
 	};
@@ -373,6 +479,7 @@ void MainWindow::buildUi()
 						      "직접 고친 클립(길이 조정·추가·삭제)이 사라지고 지금 설정으로 "
 						      "다시 만들어요. 계속할까요?") != QMessageBox::Yes)
 			return;
+		pushUndo();
 		rebuildSegments(true);
 	});
 
@@ -401,14 +508,18 @@ void MainWindow::buildUi()
 
 	connect(m_table, &QTableWidget::itemSelectionChanged, this, [this] {
 		m_timeline->setSelected(currentSegment());
+		m_editTl->setSelected(currentSegment());
 	});
 	connect(m_table, &QTableWidget::cellDoubleClicked, this, [this](int row, int) { playSegment(row); });
 	connect(m_table, &QTableWidget::itemChanged, this, [this](QTableWidgetItem *it) {
 		if (m_fillingTable || it->column() != 0 || it->row() >= m_segs.size())
 			return;
+		pushUndo();
 		m_segs[it->row()].enabled = it->checkState() == Qt::Checked;
 		m_edited = true;
 		m_timeline->setData(m_segs, m_events, m_assist->isChecked());
+		m_editTl->refresh();
+		requestThumbs();
 		refreshSummary();
 		saveCache();
 	});
@@ -437,15 +548,28 @@ void MainWindow::buildUi()
 	connect(m_player, &QMediaPlayer::positionChanged, this, [this](qint64 ms) {
 		const double t = ms / 1000.0;
 		m_timeline->setPosition(t);
+		m_editTl->setSourcePosition(t);
 		m_view->setTime(t);
 		m_subPanel->setPlayhead(t);
 		m_posLabel->setText(formatTime(t) + " / " + formatTime(m_info.duration, false));
 		if (m_playEnd >= 0 && t >= m_playEnd) {
 			m_player->pause();
 			m_playEnd = -1;
+		} else if (m_playEnd < 0 && m_resultOnly->isChecked() &&
+			   m_player->playbackState() == QMediaPlayer::PlayingState && m_editTl->segmentAtSource(t) < 0) {
+			// 결과만 재생: 클립 밖이면 다음 클립 시작으로 건너뜀, 마지막 클립 뒤면 멈춤
+			const Segment *next = nullptr;
+			for (const Segment &sg : m_segs)
+				if (sg.enabled && sg.start > t - 0.05 && (!next || sg.start < next->start))
+					next = &sg;
+			if (next)
+				m_player->setPosition(qint64(next->start * 1000) + 1);
+			else
+				m_player->pause();
 		}
 	});
 	connect(m_timeline, &TimelineBar::seekRequested, this, [this](double t) {
+		m_resultOnly->setChecked(false);
 		m_playEnd = -1;
 		m_player->setPosition(qint64(t * 1000));
 	});
@@ -506,7 +630,7 @@ void MainWindow::chooseVideo()
 
 void MainWindow::openVideo(const QString &path)
 {
-	if (m_scanner->isRunning() || m_exporter->isRunning()) {
+	if (m_scanner->isRunning() || m_exporter->isRunning() || m_rankReader->isRunning() || m_verifier->isRunning()) {
 		QMessageBox::information(this, "작업 중", "분석이나 내보내기가 끝난 뒤에 다른 영상을 열 수 있어요.");
 		return;
 	}
@@ -520,12 +644,19 @@ void MainWindow::openVideo(const QString &path)
 	QSettings().setValue("lastDir", QFileInfo(path).absolutePath());
 	m_path = path;
 	m_info = info;
+	m_rankReader->cancel();
+	m_verifier->cancel();
 	m_events.clear();
 	m_segs.clear();
+	m_cands.clear();
+	m_readings.clear();
+	m_games.clear();
+	m_readsDone = false;
 	m_edited = false;
 	m_scannedUntil = 0;
 	m_scanComplete = false;
 	m_exportStatus->clear();
+	m_rankStatus->clear();
 	m_exportProgress->setValue(0);
 	m_subPanel->setSubtitles({});
 	m_subPanel->setDuration(info.duration);
@@ -548,10 +679,17 @@ void MainWindow::openVideo(const QString &path)
 				     .arg(info.hasAudio ? "" : " · 소리 없음"));
 	m_timeline->setDuration(info.duration);
 	m_timeline->setScanned(0);
+	m_thumbs->setVideo(path);
+	m_editTl->setData(&m_segs, &m_events, info.duration);
+	m_editTl->zoomToFit();
+	m_undo.clear();
+	m_redo.clear();
 	m_player->setSource(QUrl::fromLocalFile(path));
 	m_player->pause();
 
-	if (loadCache()) {
+	const bool cached = loadCache();
+	rebuildGames(false); // 저장된 클립은 그대로 (판 목록만 다시 계산)
+	if (cached) {
 		m_scanStatus->setText(QString("이전 분석 결과를 불러왔어요 (킬 %1번%2). 다시 분석하려면 [킬 찾기 시작].")
 					      .arg(std::count_if(m_events.begin(), m_events.end(),
 								 [](const KillEvent &e) { return e.kill; }))
@@ -589,6 +727,8 @@ void MainWindow::closeEvent(QCloseEvent *e)
 		return;
 	}
 	m_scanner->cancel();
+	m_verifier->cancel();
+	m_rankReader->cancel();
 	m_exporter->cancel();
 	saveCache();
 	e->accept();
@@ -644,14 +784,22 @@ void MainWindow::startScan()
 		    QMessageBox::Yes)
 			return;
 	}
+	m_rankReader->cancel();
+	m_verifier->cancel();
 	m_events.clear();
 	m_segs.clear();
+	m_cands.clear();
+	m_readings.clear();
+	m_readsDone = false;
+	rebuildGames();
 	m_edited = false;
 	m_scannedUntil = 0;
 	m_scanComplete = false;
 	refreshTable();
 	m_scanStatus->setText("분석을 시작하는 중…");
+	m_rankStatus->setText("킬을 찾으면서 결과 화면도 함께 찾는 중…");
 	setBusy(true, false);
+	m_scanner->setResultDetection(gameRect());
 	m_scanner->start(m_path, m_roi, m_info.duration, KillScanner::Mode(m_scanMode->currentData().toInt()));
 }
 
@@ -680,6 +828,23 @@ void MainWindow::onScanFinished(bool ok, const QString &msg)
 	if (!m_edited)
 		rebuildSegments(true);
 	saveCache();
+	// 킬 숫자 확인 → 결과 화면 후보에서 등수 읽기 (멈춘 경우에도 그때까지 찾은 만큼)
+	if (!m_events.isEmpty())
+		startVerify();
+	else if (!m_cands.isEmpty())
+		startRankRead();
+	else
+		rebuildGames();
+}
+
+void MainWindow::startVerify()
+{
+	if (m_path.isEmpty() || m_events.isEmpty() || m_scanner->isRunning())
+		return;
+	m_rankReader->cancel();
+	m_scanStatus->setText("킬 숫자 확인 중…");
+	m_verifier->start(m_path, m_roi, m_events);
+	setBusy(false, false);
 }
 
 // ───────────────────────── 클립 ─────────────────────────
@@ -689,7 +854,7 @@ SegmentParams MainWindow::params() const
 	SegmentParams p;
 	p.before = m_before->value();
 	p.after = m_after->value();
-	p.mergeGap = m_gap->value();
+	p.chainGap = m_gap->value();
 	p.includeAssist = m_assist->isChecked();
 	return p;
 }
@@ -701,7 +866,7 @@ void MainWindow::rebuildSegments(bool force)
 				   "않았어요 → [다시 만들기]</span>");
 		return;
 	}
-	m_segs = buildSegments(m_events, params(), m_info.duration);
+	m_segs = buildSegments(filterEvents(m_events, m_games, gameFilter()), params(), m_info.duration);
 	m_edited = false;
 	refreshTable();
 	saveCache();
@@ -734,6 +899,10 @@ void MainWindow::refreshTable()
 	if (keep >= 0 && keep < m_segs.size())
 		m_table->selectRow(keep);
 	m_timeline->setData(m_segs, m_events, m_assist->isChecked());
+	m_editTl->refresh();
+	requestThumbs();
+	m_btnUndo->setEnabled(!m_undo.isEmpty());
+	m_btnRedo->setEnabled(!m_redo.isEmpty());
 	m_subPanel->refreshMarks();
 	refreshSummary();
 }
@@ -755,6 +924,12 @@ void MainWindow::refreshSummary()
 			       .arg(formatTime(Exporter::outputLength(on, d), false));
 	if (on.size() > 1 && m_xfade->value() > 0 && d + 0.01 < m_xfade->value())
 		text += QString(" · 짧은 클립 때문에 크로스페이드 %1초로 줄어듦").arg(d, 0, 'f', 2);
+	if (!m_games.isEmpty()) {
+		const GameFilter f = gameFilter();
+		const int kept = int(std::count_if(m_games.begin(), m_games.end(), [&](const GameResult &g) { return keepGame(g, f); }));
+		if (kept < m_games.size())
+			text += QString("<br>판 등수: %1판 중 <b>%2판</b>의 킬만 사용").arg(m_games.size()).arg(kept);
+	}
 	m_summary->setText(text);
 }
 
@@ -777,6 +952,7 @@ void MainWindow::adjustSelected(bool startSide, double delta, bool toPlayhead)
 	const int i = currentSegment();
 	if (i < 0 || i >= m_segs.size())
 		return;
+	pushUndo();
 	Segment &s = m_segs[i];
 	const double here = m_player->position() / 1000.0;
 	if (startSide) {
@@ -786,6 +962,7 @@ void MainWindow::adjustSelected(bool startSide, double delta, bool toPlayhead)
 		const double v = toPlayhead ? here : s.end + delta;
 		s.end = std::clamp(v, s.start + 0.5, m_info.duration);
 	}
+	recountSegments();
 	m_edited = true;
 	refreshTable();
 	saveCache();
@@ -805,10 +982,12 @@ void MainWindow::addSegmentAtPlayhead()
 	if (s.end - s.start < 0.5)
 		return;
 	s.manual = true;
+	pushUndo();
 	auto it = std::lower_bound(m_segs.begin(), m_segs.end(), s,
 				   [](const Segment &a, const Segment &b) { return a.start < b.start; });
 	const int idx = int(it - m_segs.begin());
 	m_segs.insert(it, s);
+	recountSegments();
 	m_edited = true;
 	refreshTable();
 	selectSegment(idx);
@@ -820,6 +999,7 @@ void MainWindow::deleteSelected()
 	const int i = currentSegment();
 	if (i < 0 || i >= m_segs.size())
 		return;
+	pushUndo();
 	m_segs.removeAt(i);
 	m_edited = true;
 	refreshTable();
@@ -848,8 +1028,8 @@ void MainWindow::startExport()
 		QMessageBox::information(this, "내보내기", "내보낼 클립이 없어요. 먼저 킬을 찾아 주세요.");
 		return;
 	}
-	if (m_scanner->isRunning()) {
-		QMessageBox::information(this, "내보내기", "분석이 끝난 뒤에 내보낼 수 있어요.");
+	if (m_scanner->isRunning() || m_rankReader->isRunning() || m_verifier->isRunning()) {
+		QMessageBox::information(this, "내보내기", "분석(등수 읽기 포함)이 끝난 뒤에 내보낼 수 있어요.");
 		return;
 	}
 	QSettings st;
@@ -884,12 +1064,17 @@ void MainWindow::startExport()
 void MainWindow::setBusy(bool scanning, bool exporting)
 {
 	const bool hasVideo = !m_path.isEmpty();
-	m_btnScan->setText(scanning ? "⏹ 분석 멈추기" : "🔍 킬 찾기 시작");
+	const bool verifying = m_verifier->isRunning();
+	m_btnScan->setText(scanning || verifying ? "⏹ 분석 멈추기" : "🔍 킬 찾기 시작");
 	m_btnScan->setEnabled(hasVideo && !exporting);
 	m_scanMode->setEnabled(!scanning);
 	m_btnExport->setText(exporting ? "⏹ 내보내기 멈추기" : "💾 영상 내보내기…");
-	m_btnExport->setEnabled(hasVideo && !scanning);
+	m_btnExport->setEnabled(hasVideo && !scanning && !verifying);
+	m_btnVerify->setEnabled(hasVideo && !scanning && !exporting && !verifying && !m_events.isEmpty());
 	m_btnRebuild->setEnabled(!scanning && !exporting);
+	const bool reading = m_rankReader->isRunning();
+	m_btnReadRanks->setEnabled(hasVideo && !scanning && !exporting && !reading && !m_cands.isEmpty());
+	m_gameArea->setEnabled(!scanning);
 }
 
 // ───────────────────────── 분석 결과 저장 ─────────────────────────
@@ -923,6 +1108,10 @@ void MainWindow::saveCache()
 	o["edited"] = m_edited;
 	o["scannedUntil"] = m_scannedUntil;
 	o["complete"] = m_scanComplete;
+	o["resultScreens"] = candidatesToJson(m_cands);
+	o["rankReadings"] = readingsToJson(m_readings);
+	o["ranksRead"] = m_readsDone;
+	o["gameEdits"] = gameEditsToJson(m_games);
 	QFile f(cachePath());
 	if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
 		f.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
@@ -947,5 +1136,353 @@ bool MainWindow::loadCache()
 	m_edited = o["edited"].toBool();
 	m_scannedUntil = o["scannedUntil"].toDouble();
 	m_scanComplete = o["complete"].toBool();
+	m_cands = candidatesFromJson(o["resultScreens"].toArray());
+	m_readings = readingsFromJson(o["rankReadings"].toArray());
+	m_readsDone = o["ranksRead"].toBool();
+	m_games = gameEditsFromJson(o["gameEdits"].toArray()); // 직접 고친 값만 (rebuildGames 가 옮겨 담음)
 	return !m_events.isEmpty() || !m_segs.isEmpty() || m_scannedUntil > 0 || !m_subPanel->subtitles().isEmpty();
+}
+
+// ───────────────────────── 판 등수 ─────────────────────────
+
+QWidget *MainWindow::buildRankTab()
+{
+	QSettings st;
+	auto *w = new QWidget;
+	m_rankFilter = new QCheckBox("등수 필터 사용:");
+	m_rankFilter->setChecked(st.value("rankFilter", false).toBool());
+	m_maxRank = new QSpinBox;
+	m_maxRank->setRange(1, 24);
+	m_maxRank->setValue(st.value("maxRank", 3).toInt());
+	m_maxRank->setSuffix(" 등");
+	m_keepUnknown = new QCheckBox("등수를 모르는 판도 남기기");
+	m_keepUnknown->setChecked(st.value("keepUnknown", true).toBool());
+	m_keepUnknown->setToolTip("결과 화면을 못 찾았거나 숫자를 못 읽은 판, 영상이 판 중간에 끝난 경우");
+	m_gameArea = new QComboBox;
+	m_gameArea->addItem("영상 전체 (보통)", 0);
+	m_gameArea->addItem("킬 숫자 영역으로 계산 (게임 화면이 작게 들어간 방송)", 1);
+	m_gameArea->setCurrentIndex(std::max(0, m_gameArea->findData(st.value("gameArea", 0).toInt())));
+	m_gameArea->setToolTip("결과 화면을 찾을 게임 화면 위치. 바꾸면 [킬 찾기 시작]으로 다시 분석해야 해요");
+
+	auto *row1 = new QHBoxLayout;
+	row1->addWidget(m_rankFilter);
+	row1->addWidget(m_maxRank);
+	row1->addWidget(new QLabel("이상 판의 킬만 남기기"));
+	row1->addStretch(1);
+	auto *row2 = new QHBoxLayout;
+	row2->addWidget(m_keepUnknown);
+	row2->addStretch(1);
+	auto *row3 = new QHBoxLayout;
+	row3->addWidget(new QLabel("게임 화면"));
+	row3->addWidget(m_gameArea, 1);
+
+	m_gameTable = new QTableWidget(0, 7);
+	m_gameTable->setHorizontalHeaderLabels({"남김", "판", "결과 화면", "등수", "킬", "상태", "근거"});
+	m_gameTable->verticalHeader()->setVisible(false);
+	m_gameTable->verticalHeader()->setDefaultSectionSize(24);
+	m_gameTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+	m_gameTable->setSelectionMode(QAbstractItemView::SingleSelection);
+	m_gameTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+	m_gameTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Stretch);
+	m_gameTable->setColumnWidth(0, 44);
+	m_gameTable->setColumnWidth(1, 36);
+	m_gameTable->setColumnWidth(2, 80);
+	m_gameTable->setColumnWidth(3, 50);
+	m_gameTable->setColumnWidth(4, 36);
+	m_gameTable->setColumnWidth(5, 70);
+	m_gameTable->setToolTip("더블클릭: 그 판의 결과 화면으로 이동 · 등수 칸 더블클릭: 등수 직접 고치기");
+
+	m_rankStatus = new QLabel;
+	m_rankStatus->setWordWrap(true);
+	m_btnReadRanks = smallButton("등수 다시 읽기", "분석 때 찾은 결과 화면에서 등수만 다시 읽어요 (영상 전체를 다시 훑지 않음)");
+	m_btnResetGames = smallButton("직접 고친 것 되돌리기", "판마다 직접 바꾼 등수·남김 표시를 자동 판정으로 되돌려요");
+	m_btnSaveLog = smallButton("판별 기록 저장 (CSV)…");
+	auto *row4 = new QHBoxLayout;
+	row4->addWidget(m_btnReadRanks);
+	row4->addWidget(m_btnResetGames);
+	row4->addStretch(1);
+	row4->addWidget(m_btnSaveLog);
+
+	auto *help = new QLabel("<span style='color:#888'>게임이 끝난 뒤 나오는 결과 화면 · 점수 창 · 순위표에서 등수를 읽어요. "
+				"방송인이 1초 만에 넘겨도 판마다 화면이 2~3개라 대부분 잡혀요. 두 화면 이상이 같으면 <b>확실</b>, "
+				"하나만 읽었거나 서로 다르면 <b>확인 필요</b>.</span>");
+	help->setWordWrap(true);
+
+	auto *l = new QVBoxLayout(w);
+	l->setContentsMargins(6, 6, 6, 6);
+	l->addLayout(row1);
+	l->addLayout(row2);
+	l->addLayout(row3);
+	l->addWidget(m_gameTable, 1);
+	l->addWidget(m_rankStatus);
+	l->addLayout(row4);
+	l->addWidget(help);
+
+	connect(m_rankFilter, &QCheckBox::toggled, this, &MainWindow::gameFilterChanged);
+	connect(m_maxRank, &QSpinBox::valueChanged, this, &MainWindow::gameFilterChanged);
+	connect(m_keepUnknown, &QCheckBox::toggled, this, &MainWindow::gameFilterChanged);
+	connect(m_gameArea, &QComboBox::currentIndexChanged, this, [this] {
+		QSettings().setValue("gameArea", m_gameArea->currentData());
+		if (!m_cands.isEmpty())
+			m_rankStatus->setText("게임 화면 위치를 바꿨어요. 새 위치로 찾으려면 [킬 찾기 시작]으로 다시 분석하세요.");
+	});
+	connect(m_btnReadRanks, &QPushButton::clicked, this, &MainWindow::startRankRead);
+	connect(m_btnResetGames, &QPushButton::clicked, this, [this] {
+		for (GameResult &g : m_games) {
+			g.userRank = 0;
+			g.userKeep = -1;
+		}
+		refreshGameTable();
+		rebuildSegments(false);
+		saveCache();
+	});
+	connect(m_btnSaveLog, &QPushButton::clicked, this, &MainWindow::saveGameLog);
+	connect(m_gameTable, &QTableWidget::itemChanged, this, [this](QTableWidgetItem *it) {
+		if (m_fillingGames || it->column() != 0 || it->row() >= m_games.size())
+			return;
+		m_games[it->row()].userKeep = it->checkState() == Qt::Checked ? 1 : 0;
+		refreshGameTable();
+		rebuildSegments(false);
+		saveCache();
+	});
+	connect(m_gameTable, &QTableWidget::cellDoubleClicked, this, [this](int row, int col) {
+		if (row < 0 || row >= m_games.size())
+			return;
+		GameResult &g = m_games[row];
+		if (col == 3 && g.status != GameResult::NoResult) {
+			bool ok = false;
+			const int v = QInputDialog::getInt(this, "등수 고치기",
+							   QString("%1판 등수 (0 = 자동 판정으로 되돌리기)").arg(row + 1),
+							   g.shownRank(), 0, 24, 1, &ok);
+			if (!ok)
+				return;
+			g.userRank = v;
+			refreshGameTable();
+			rebuildSegments(false);
+			saveCache();
+			return;
+		}
+		// 결과 화면(없으면 판 시작)으로 이동
+		m_playEnd = -1;
+		const double t = g.status == GameResult::NoResult ? g.start : g.end + 0.3;
+		m_player->setPosition(qint64(t * 1000));
+	});
+	return w;
+}
+
+QRectF MainWindow::gameRect() const
+{
+	if (m_gameArea->currentData().toInt() == 1)
+		return gameRectFromKillRoi(m_roi, m_info.width, m_info.height);
+	return QRectF(0, 0, 1, 1);
+}
+
+GameFilter MainWindow::gameFilter() const
+{
+	GameFilter f;
+	f.enabled = m_rankFilter->isChecked();
+	f.maxRank = m_maxRank->value();
+	f.keepUnknown = m_keepUnknown->isChecked();
+	return f;
+}
+
+void MainWindow::gameFilterChanged()
+{
+	QSettings s;
+	s.setValue("rankFilter", m_rankFilter->isChecked());
+	s.setValue("maxRank", m_maxRank->value());
+	s.setValue("keepUnknown", m_keepUnknown->isChecked());
+	refreshGameTable();
+	rebuildSegments(false);
+}
+
+void MainWindow::startRankRead()
+{
+	if (m_path.isEmpty() || m_cands.isEmpty() || m_scanner->isRunning())
+		return;
+	m_readsDone = false;
+	m_rankStatus->setText(QString("결과 화면 %1곳에서 등수 읽는 중…").arg(m_cands.size()));
+	m_rankReader->start(m_path, gameRect(), m_cands);
+	setBusy(false, false);
+}
+
+void MainWindow::rebuildGames(bool applyToClips)
+{
+	const QVector<GameResult> old = m_games;
+	m_games = buildGames(m_cands, m_readings, m_events, m_info.duration);
+	carryOverUserEdits(old, &m_games);
+	refreshGameTable();
+	if (applyToClips && !m_games.isEmpty())
+		rebuildSegments(false);
+	if (m_rankReader->isRunning())
+		return;
+	if (m_path.isEmpty()) {
+		m_rankStatus->clear();
+	} else if (m_cands.isEmpty() && m_scannedUntil <= 0) {
+		m_rankStatus->setText("[킬 찾기 시작]을 누르면 결과 화면도 함께 찾아요.");
+	} else if (m_cands.isEmpty()) {
+		m_rankStatus->setText("<span style='color:#e9a'>결과 화면을 하나도 찾지 못했어요. 게임 화면이 영상 일부에만 "
+				      "들어간 방송이면 [게임 화면]을 '킬 숫자 영역으로 계산'으로 바꾸고 다시 분석해 보세요.</span>");
+	} else {
+		const int sure = int(std::count_if(m_games.begin(), m_games.end(),
+						   [](const GameResult &g) { return g.status == GameResult::Sure; }));
+		const int check = int(std::count_if(m_games.begin(), m_games.end(),
+						    [](const GameResult &g) { return g.status == GameResult::Check; }));
+		QString t = QString("판 <b>%1개</b> · 확실 %2 · 확인 필요 %3").arg(m_games.size()).arg(sure).arg(check);
+		if (!m_readsDone)
+			t += " · <span style='color:#e9a'>등수를 아직 다 읽지 않았어요 → [등수 다시 읽기]</span>";
+		m_rankStatus->setText(t);
+	}
+}
+
+void MainWindow::refreshGameTable()
+{
+	const GameFilter f = gameFilter();
+	m_fillingGames = true;
+	m_gameTable->setRowCount(int(m_games.size()));
+	for (int i = 0; i < m_games.size(); ++i) {
+		const GameResult &g = m_games[i];
+		const bool keep = keepGame(g, f);
+		auto *on = new QTableWidgetItem;
+		on->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable);
+		on->setCheckState(keep ? Qt::Checked : Qt::Unchecked);
+		if (g.userKeep >= 0)
+			on->setToolTip("직접 정함");
+		m_gameTable->setItem(i, 0, on);
+		m_gameTable->setItem(i, 1, new QTableWidgetItem(QString::number(i + 1)));
+		m_gameTable->setItem(i, 2, new QTableWidgetItem(g.status == GameResult::NoResult ? QString("-")
+												  : formatTime(g.end, false)));
+		const int r = g.shownRank();
+		auto *ri = new QTableWidgetItem(r > 0 ? QString("%1위%2").arg(r).arg(g.userRank > 0 ? " ✎" : "") : QString("?"));
+		if (g.userRank > 0)
+			ri->setToolTip(QString("직접 고침 (자동 판정: %1)").arg(g.rank > 0 ? QString("%1위").arg(g.rank) : "모름"));
+		m_gameTable->setItem(i, 3, ri);
+		m_gameTable->setItem(i, 4, new QTableWidgetItem(QString::number(g.kills)));
+		auto *st = new QTableWidgetItem(g.userRank > 0 ? QString("직접 고침") : statusText(g.status));
+		if (g.userRank == 0 && g.status == GameResult::Check)
+			st->setForeground(QColor(230, 150, 60));
+		m_gameTable->setItem(i, 5, st);
+		auto *ev = new QTableWidgetItem(g.evidence);
+		ev->setToolTip(g.evidence);
+		m_gameTable->setItem(i, 6, ev);
+		if (!keep)
+			for (int c = 1; c < 7; ++c)
+				m_gameTable->item(i, c)->setForeground(QColor(140, 140, 140));
+	}
+	m_fillingGames = false;
+	m_btnSaveLog->setEnabled(!m_games.isEmpty());
+	m_btnResetGames->setEnabled(std::any_of(m_games.begin(), m_games.end(),
+						[](const GameResult &g) { return g.userRank > 0 || g.userKeep >= 0; }));
+	m_btnReadRanks->setEnabled(!m_cands.isEmpty() && !m_scanner->isRunning() && !m_rankReader->isRunning() &&
+				   !m_exporter->isRunning());
+}
+
+void MainWindow::saveGameLog()
+{
+	if (m_games.isEmpty())
+		return;
+	const QFileInfo fi(m_path);
+	const QString out = QFileDialog::getSaveFileName(this, "판별 기록 저장", fi.absoluteDir().filePath(fi.completeBaseName() + "_판별기록.csv"),
+							 "CSV (*.csv)");
+	if (out.isEmpty())
+		return;
+	QFile f(out);
+	if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+		QMessageBox::warning(this, "저장 실패", "파일을 쓸 수 없어요: " + out);
+		return;
+	}
+	const GameFilter flt = gameFilter();
+	QTextStream ts(&f);
+	ts.setEncoding(QStringConverter::Utf8);
+	ts.setGenerateByteOrderMark(true); // 엑셀에서 한글이 깨지지 않게
+	auto q = [](QString v) { return "\"" + v.replace("\"", "\"\"") + "\""; };
+	ts << "판,시작,결과 화면,등수,자동 판정 등수,상태,킬,남김,근거\n";
+	for (int i = 0; i < m_games.size(); ++i) {
+		const GameResult &g = m_games[i];
+		ts << i + 1 << "," << formatTime(g.start, false) << ","
+		   << (g.status == GameResult::NoResult ? QString("-") : formatTime(g.end, false)) << ","
+		   << (g.shownRank() > 0 ? QString::number(g.shownRank()) : QString("?")) << ","
+		   << (g.rank > 0 ? QString::number(g.rank) : QString("?")) << ","
+		   << (g.userRank > 0 ? QString("직접 고침") : statusText(g.status)) << "," << g.kills << ","
+		   << (keepGame(g, flt) ? "남김" : "뺌") << "," << q(g.evidence) << "\n";
+	}
+	m_rankStatus->setText("판별 기록을 저장했어요: " + QDir::toNativeSeparators(out));
+}
+
+// ───────────────────────── 컷 편집 ─────────────────────────
+
+void MainWindow::pushUndo()
+{
+	m_undo.push_back(m_segs);
+	if (m_undo.size() > 100)
+		m_undo.removeFirst();
+	m_redo.clear();
+	m_btnUndo->setEnabled(true);
+	m_btnRedo->setEnabled(false);
+}
+
+void MainWindow::undo()
+{
+	if (m_undo.isEmpty())
+		return;
+	m_redo.push_back(m_segs);
+	m_segs = m_undo.takeLast();
+	m_edited = true;
+	refreshTable();
+	saveCache();
+}
+
+void MainWindow::redo()
+{
+	if (m_redo.isEmpty())
+		return;
+	m_undo.push_back(m_segs);
+	m_segs = m_redo.takeLast();
+	m_edited = true;
+	refreshTable();
+	saveCache();
+}
+
+void MainWindow::recountSegments()
+{
+	for (Segment &s : m_segs) {
+		s.kills = s.assists = 0;
+		for (const KillEvent &e : m_events) {
+			if (!e.counts() || e.time < s.start || e.time > s.end)
+				continue;
+			if (e.kill)
+				s.kills += std::max(1, e.kills);
+			else
+				s.assists += std::max(1, e.assists);
+		}
+	}
+}
+
+void MainWindow::splitAtPlayhead()
+{
+	const double t = m_player->position() / 1000.0;
+	const int i = m_editTl->segmentAtSource(t);
+	if (i < 0) {
+		m_summary->setText("<span style='color:#e9a'>자를 위치가 클립 안에 있어야 해요. 편집 타임라인에서 자를 곳을 누른 뒤 S</span>");
+		return;
+	}
+	if (t - m_segs[i].start < 0.3 || m_segs[i].end - t < 0.3)
+		return; // 끝에 너무 가까움
+	pushUndo();
+	Segment back = m_segs[i];
+	back.start = t;
+	m_segs[i].end = t;
+	m_segs.insert(i + 1, back);
+	recountSegments();
+	m_edited = true;
+	refreshTable();
+	selectSegment(i + 1);
+	saveCache();
+}
+
+void MainWindow::requestThumbs()
+{
+	for (const Segment &s : m_segs)
+		if (s.enabled)
+			m_thumbs->request(std::max(0.0, s.start - 8), std::min(m_info.duration, s.end + 8));
 }
