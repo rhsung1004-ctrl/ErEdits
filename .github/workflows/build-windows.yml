@@ -62,7 +62,26 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "windeployqt 실패" }
 
           # ffmpeg.exe (킬 분석, 영상 내보내기)
-          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
+          # 받는 곳이 가끔 504 를 내서: 몇 번 다시 시도하고, 안 되면 다른 곳(gyan.dev)에서
+          $ffUrls = @(
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          )
+          $got = $false
+          foreach ($u in $ffUrls) {
+            try {
+              Invoke-WebRequest $u -OutFile ffmpeg.zip -TimeoutSec 300
+              $got = $true
+              break
+            } catch {
+              Write-Warning "ffmpeg 받기 실패 ($u): $($_.Exception.Message) — 20초 뒤 다시"
+              Start-Sleep -Seconds 20
+            }
+          }
+          if (-not $got) { throw "ffmpeg 를 받지 못했습니다" }
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
           Copy-Item (Get-ChildItem ffmpeg-tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName $dist
 
