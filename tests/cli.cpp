@@ -151,10 +151,22 @@ int main(int argc, char *argv[])
 		auto *ai = new LocalAi(&app);
 		auto events = std::make_shared<QVector<KillEvent>>();
 		auto loud = std::make_shared<QVector<float>>();
+		auto screen = std::make_shared<QVector<float>>();
+		if (qEnvironmentVariableIsSet("ERKCLI_SCREENCHAT")) // 채팅 파일 대신 화면 채팅
+			sc->setChatDetection(QRectF(0.735, 0.24, 0.265, 0.36));
 		auto cands = std::make_shared<QVector<FunCandidate>>();
 		SignalParams sp;
 		QObject::connect(sc, &KillScanner::found, [=](const KillEvent &e) { events->push_back(e); });
-		QObject::connect(sc, &KillScanner::finished, [=](bool, const QString &) { kv->start(a[2], roi, *events); });
+		QObject::connect(sc, &KillScanner::finished, [=, &out](bool, const QString &) {
+			if (sc->chatMeasured()) {
+				*screen = sc->chatLines();
+				out << "screen-chat";
+				for (float v : *screen)
+					out << " " << v;
+				out << "\n";
+			}
+			kv->start(a[2], roi, *events);
+		});
 		QObject::connect(kv, &KillVerifier::finished, [=](const QVector<KillEvent> &ev) {
 			*events = ev;
 			al->start(a[2], info.duration);
@@ -162,7 +174,7 @@ int main(int argc, char *argv[])
 		QObject::connect(al, &AudioLevels::finished, [=, &out, &app](bool ok, const QVector<float> &db) {
 			*loud = db;
 			out << "audio ok=" << ok << " seconds=" << db.size() << "\n";
-			const Signals sig = computeSignals(chat, *loud, info.duration, sp);
+			const Signals sig = computeSignals(chat, *screen, *loud, info.duration, sp);
 			QVector<Segment> segs = buildSegments(*events, SegmentParams{}, info.duration);
 			scoreSegments(&segs, *events, {}, sig);
 			for (const Segment &s : segs)

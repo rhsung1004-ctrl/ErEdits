@@ -113,8 +113,8 @@ QVector<float> windowSum(const QVector<float> &perSec)
 
 } // namespace
 
-Signals computeSignals(const QVector<ChatMessage> &chat, const QVector<float> &loudDb, double duration,
-		       const SignalParams &p)
+Signals computeSignals(const QVector<ChatMessage> &chat, const QVector<float> &screenLines,
+		       const QVector<float> &loudDb, double duration, const SignalParams &p)
 {
 	Signals s;
 	s.seconds = std::max(1, int(std::ceil(duration)));
@@ -130,7 +130,14 @@ Signals computeSignals(const QVector<ChatMessage> &chat, const QVector<float> &l
 		else if (isHypeChat(m.text))
 			h[i] += 1;
 	}
-	s.hasChat = !chat.isEmpty();
+	if (chat.isEmpty()) // 화면 채팅: 줄 수만 (웃음·감탄은 모름)
+		for (int sec = 0; sec < screenLines.size(); ++sec) {
+			const int i = int(std::floor(sec - p.chatDelay));
+			if (i >= 0 && i < n)
+				c[i] += screenLines[sec];
+		}
+	s.chatHasText = !chat.isEmpty();
+	s.hasChat = s.chatHasText || !screenLines.isEmpty();
 	s.chat = windowSum(c);
 	s.laugh = windowSum(l);
 	s.hype = windowSum(h);
@@ -240,10 +247,15 @@ QVector<FunCandidate> findFunCandidates(const Signals &sig, const QVector<ChatMe
 	std::vector<Peak> peaks;
 	for (int t = 0; t < n; ++t) {
 		float f;
-		if (sig.hasChat) {
+		const float loud = std::max(0.f, sig.hasAudio ? sig.loudZ[t] : 0.f);
+		if (sig.chatHasText) {
 			if (sig.laugh[t] < 3 || sig.laughZ[t] < 2.5f)
 				continue;
-			f = sig.laughZ[t] + 0.3f * std::max(0.f, sig.hasAudio ? sig.loudZ[t] : 0.f);
+			f = sig.laughZ[t] + 0.3f * loud;
+		} else if (sig.hasChat) { // 화면 채팅: 채팅이 확 빨라진 곳
+			if (sig.chat[t] < 4 || sig.chatZ[t] < 3.0f)
+				continue;
+			f = sig.chatZ[t] + 0.3f * loud;
 		} else {
 			if (sig.loudZ[t] < 3.5f)
 				continue;
@@ -278,7 +290,7 @@ QVector<FunCandidate> findFunCandidates(const Signals &sig, const QVector<ChatMe
 		}
 		if (c.end - c.start < 8)
 			continue;
-		if (sig.hasChat) {
+		if (sig.chatHasText) {
 			QSet<QString> seen;
 			for (const ChatMessage &m : chat) {
 				const double t = m.time + p.chatOffset - p.chatDelay;
@@ -291,6 +303,12 @@ QVector<FunCandidate> findFunCandidates(const Signals &sig, const QVector<ChatMe
 			}
 			c.score = int(std::clamp(20.0 + sig.laughZ[pk.t] * 8.0 + c.laughs * 0.5, 0.0, 100.0));
 			c.reason = QString("ㅋㅋ 채팅 %1개").arg(c.laughs);
+			if (sig.hasAudio && sig.maxIn(sig.loudZ, c.peak - 15, c.peak) >= 2.5f)
+				c.reason += " · 큰 웃음/소리";
+		} else if (sig.hasChat) {
+			const double z = sig.chatZ[pk.t];
+			c.score = int(std::clamp(15.0 + z * 7.0, 0.0, 85.0));
+			c.reason = QString("채팅이 빨라짐 (5초에 %1줄)").arg(int(std::lround(sig.chat[pk.t])));
 			if (sig.hasAudio && sig.maxIn(sig.loudZ, c.peak - 15, c.peak) >= 2.5f)
 				c.reason += " · 큰 웃음/소리";
 		} else {

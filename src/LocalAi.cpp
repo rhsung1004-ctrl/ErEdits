@@ -64,7 +64,7 @@ QString LocalAi::buildPrompt(const FunCandidate &c, const QVector<Line> &lines)
 	QString p;
 	p += "너는 게임 방송(이터널리턴) 다시보기를 롱폼 영상으로 편집하는 편집자를 돕는다.\n"
 	     "롱폼은 게임 속 잘한 장면 위주이고, 중간중간 분위기를 바꿔 줄 '재밌는 장면'을 짧게 넣는다.\n"
-	     "아래는 시청자 채팅에 웃음(ㅋㅋ)이 몰린 순간 앞뒤의 방송인 말(음성 인식, 틀린 글자가 있을 수 있음)과 그때 채팅이다.\n\n";
+	     "아래는 시청자 채팅이 갑자기 몰린 순간 앞뒤의 방송인 말(음성 인식, 틀린 글자가 있을 수 있음)과 그때 채팅이다.\n\n";
 	p += "[방송인 말] (번호, 초, 내용)\n";
 	if (lines.isEmpty())
 		p += "(말이 거의 없음)\n";
@@ -74,16 +74,18 @@ QString LocalAi::buildPrompt(const FunCandidate &c, const QVector<Line> &lines)
 		if (peakLine < 0 && lines[i].t1 >= c.peak - 1)
 			peakLine = i;
 	}
-	p += QString("\n채팅 웃음이 터진 때: 약 %1초").arg(kBefore, 0, 'f', 0);
+	p += QString("\n채팅 반응이 터진 때: 약 %1초").arg(kBefore, 0, 'f', 0);
 	if (peakLine >= 0)
 		p += QString(" (%1번 줄 근처)").arg(peakLine);
 	p += "\n\n[그때 채팅]\n";
+	if (c.chatSample.isEmpty())
+		p += "(채팅 내용은 모름 — 채팅 속도만 빨라짐. 방송인 말로 판단)\n";
 	for (const QString &m : c.chatSample)
 		p += "- " + m + "\n";
 	p += "\n판단할 것:\n"
 	     "1) 롱폼에 넣을 만큼 재밌는 장면인가? (드립·리액션·웃긴 상황·티키타카는 예, 단순 인사·후원 읽기·광고·잡음은 아니오)\n"
 	     "2) 재밌는 정도 1~10\n"
-	     "3) 이 장면만 떼어 봐도 이해되도록 시작 줄과 끝 줄 번호 (웃음이 터진 줄은 꼭 포함, 보통 10~40초)\n"
+	     "3) 이 장면만 떼어 봐도 이해되도록 시작 줄과 끝 줄 번호 (반응이 터진 줄은 꼭 포함, 보통 10~40초)\n"
 	     "4) 편집자가 알아보기 쉬운 한 줄 설명 (20자 안쪽, 한국어)\n\n"
 	     "JSON 하나로만 답해:\n"
 	     "{\"funny\": true, \"score\": 7, \"start_line\": 3, \"end_line\": 9, \"title\": \"...\", \"reason\": \"...\"}";

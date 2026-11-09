@@ -435,6 +435,7 @@ void MainWindow::buildUi()
 	tabs->addTab(buildRankTab(), "판 등수");
 	m_aiPanel = new AiPanel;
 	m_aiPanel->setSegmentsProvider([this] { return m_segs; });
+	m_aiPanel->setTimeProvider([this] { return m_player->position() / 1000.0; });
 	tabs->addTab(m_aiPanel, "AI 편집점");
 	connect(m_aiPanel, &AiPanel::signalsChanged, this, [this] {
 		scoreSegments(&m_segs, m_events, m_games, m_aiPanel->sig());
@@ -834,12 +835,15 @@ void MainWindow::startScan()
 	m_rankStatus->setText("킬을 찾으면서 결과 화면도 함께 찾는 중…");
 	setBusy(true, false);
 	m_scanner->setResultDetection(gameRect());
+	m_scanner->setChatDetection(m_aiPanel->screenChatRect());
 	m_scanner->start(m_path, m_roi, m_info.duration, KillScanner::Mode(m_scanMode->currentData().toInt()));
 }
 
 void MainWindow::onScanFinished(bool ok, const QString &msg)
 {
 	setBusy(false, false);
+	if (m_scanner->chatMeasured() && !m_scanner->chatLines().isEmpty())
+		m_aiPanel->setScreenChat(m_scanner->chatLines());
 	const int kills = int(std::count_if(m_events.begin(), m_events.end(), [](const KillEvent &e) { return e.kill; }));
 	const int assists =
 		int(std::count_if(m_events.begin(), m_events.end(), [](const KillEvent &e) { return !e.kill && e.assist; }));

@@ -27,7 +27,7 @@ constexpr double kAspect = double(HudKillWatcher::kW) / HudKillWatcher::kH; // 5
 
 // ───────────────────────── FrameView ─────────────────────────
 
-FrameView::FrameView(QWidget *parent) : QWidget(parent)
+FrameView::FrameView(QWidget *parent) : QWidget(parent), m_aspect(kAspect), m_label("킬 숫자 영역")
 {
 	setMinimumSize(640, 360);
 	setFocusPolicy(Qt::StrongFocus);
@@ -76,10 +76,11 @@ void FrameView::setRoiPixels(QRectF r)
 		return;
 	// 크기 제한 (숫자가 너무 작거나 크면 인식 불가)
 	double w = std::clamp(r.width(), 40.0, W);
-	double h = w / kAspect;
+	double h = m_aspect > 0 ? w / m_aspect : std::clamp(r.height(), 40.0, H);
 	if (h > H) {
 		h = H;
-		w = h * kAspect;
+		if (m_aspect > 0)
+			w = h * m_aspect;
 	}
 	r.setSize(QSizeF(w, h));
 	r.moveLeft(std::clamp(r.left(), 0.0, W - w));
@@ -115,7 +116,7 @@ void FrameView::paintEvent(QPaintEvent *)
 	p.setPen(QColor(255, 196, 0));
 	// 위에 자리가 없으면 상자 아래에 글씨
 	const double ty = wr.top() - ir.top() >= 18 ? wr.top() - 6 : wr.bottom() + 16;
-	p.drawText(QPointF(std::min(wr.left(), double(width() - 90)), ty), "킬 숫자 영역");
+	p.drawText(QPointF(std::min(wr.left(), double(width() - 90)), ty), m_label);
 }
 
 void FrameView::mousePressEvent(QMouseEvent *e)
@@ -137,11 +138,11 @@ void FrameView::mouseMoveEvent(QMouseEvent *e)
 		setRoiPixels(m_startRoi.translated(ip - m_anchor));
 		return;
 	}
-	// 가로 길이로 크기를 정하고 세로는 5:1 로 맞춤
+	// 가로 길이로 크기를 정하고 세로는 5:1 로 맞춤 (자유 비율이면 끈 만큼)
 	const double w = std::abs(ip.x() - m_anchor.x());
 	if (w < 8)
 		return;
-	const double h = w / kAspect;
+	const double h = m_aspect > 0 ? w / m_aspect : std::max(8.0, std::abs(ip.y() - m_anchor.y()));
 	const double x = ip.x() < m_anchor.x() ? m_anchor.x() - w : m_anchor.x();
 	const double y = ip.y() < m_anchor.y() ? m_anchor.y() - h : m_anchor.y();
 	setRoiPixels(QRectF(x, y, w, h));
@@ -160,7 +161,7 @@ void FrameView::wheelEvent(QWheelEvent *e)
 	const QRectF r = roiPixels();
 	const double f = e->angleDelta().y() > 0 ? 1.03 : 1 / 1.03;
 	const QPointF c = r.center();
-	const double w = r.width() * f, h = w / kAspect;
+	const double w = r.width() * f, h = m_aspect > 0 ? w / m_aspect : r.height() * f;
 	setRoiPixels(QRectF(c.x() - w / 2, c.y() - h / 2, w, h));
 }
 

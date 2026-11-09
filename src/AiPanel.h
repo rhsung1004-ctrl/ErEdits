@@ -8,6 +8,7 @@
 #include <functional>
 
 class AudioLevels;
+class KillScanner;
 class ChzzkChat;
 class QCheckBox;
 class QDoubleSpinBox;
@@ -30,7 +31,13 @@ public:
 
 	void setVideo(const QString &path, double duration, bool hasAudio, const QString &cacheFile);
 	void setSegmentsProvider(std::function<QVector<Segment>()> f) { m_segments = std::move(f); }
+	void setTimeProvider(std::function<double()> f) { m_now = std::move(f); }
+	// 화면 채팅: 킬 찾기 때 같이 잴지, 채팅창 영역(0~1 비율, 끄면 빈 영역)
+	QRectF screenChatRect() const;
+	// 킬 찾기가 잰 초마다 새 채팅 줄 수
+	void setScreenChat(const QVector<float> &lines);
 	bool hasSignals() const { return m_sig.hasChat || m_sig.hasAudio; }
+	static QRectF defaultChatRect() { return QRectF(0.735, 0.24, 0.265, 0.36); }
 	const Signals &sig() const { return m_sig; }
 	const QVector<FunCandidate> &candidates() const { return m_cands; }
 	// 메인 창 클립이 바뀐 뒤: 넣음 표시 맞추기
@@ -46,6 +53,8 @@ signals:
 
 private:
 	void fetchChat();
+	void pickChatRect();
+	void scanScreenChat();
 	void findPoints();
 	void recompute();
 	void runAi();
@@ -59,6 +68,9 @@ private:
 	double m_duration = 0;
 	bool m_hasAudio = false;
 	std::function<QVector<Segment>()> m_segments;
+	std::function<double()> m_now;
+	QVector<float> m_screen; // 화면 채팅 (초마다 새 줄 수)
+	KillScanner *m_chatScan;
 
 	QVector<ChatMessage> m_chat;
 	QVector<float> m_loud;
@@ -71,6 +83,11 @@ private:
 	LocalAi *m_ai;
 	QTimer *m_recalc;
 
+	QCheckBox *m_screenOn;
+	QPushButton *m_btnChatRect;
+	QPushButton *m_btnScreenScan;
+	QLabel *m_screenStatus;
+	class QGroupBox *m_chzzkBox;
 	QLineEdit *m_url;
 	QPushButton *m_btnChat;
 	QDoubleSpinBox *m_offset;

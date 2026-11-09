@@ -29,7 +29,8 @@ struct SignalParams {
 // 1초 단위 신호. 각 값은 그 영상에서 "평소보다 얼마나 튀는지" (0 = 평소, 3 이상 = 눈에 띄게)
 struct Signals {
 	int seconds = 0;
-	bool hasChat = false;
+	bool hasChat = false;     // 채팅 신호 있음 (받은 채팅 또는 화면 채팅)
+	bool chatHasText = false; // 채팅 내용까지 있음 (치지직에서 받은 채팅) — 없으면 화면에서 잰 속도만
 	bool hasAudio = false;
 	QVector<float> chat;  // 채팅 수 (5초 합)
 	QVector<float> laugh; // 웃음 채팅 수 (5초 합)
@@ -39,9 +40,11 @@ struct Signals {
 	float maxIn(const QVector<float> &v, double a, double b) const;
 };
 
+// chat: 치지직에서 받은 채팅 (있으면 이걸 씀)
+// screenLines: 방송 화면 채팅창에서 잰 초마다 새 채팅 줄 수 (받은 채팅이 없을 때)
 // loudDb: 1초마다 소리 크기(dB, 없으면 빈 배열)
-Signals computeSignals(const QVector<ChatMessage> &chat, const QVector<float> &loudDb, double duration,
-		       const SignalParams &p);
+Signals computeSignals(const QVector<ChatMessage> &chat, const QVector<float> &screenLines,
+		       const QVector<float> &loudDb, double duration, const SignalParams &p);
 
 // 킬 클립 점수 매기기 (kind == Kill 인 클립만, score·note 를 채움)
 void scoreSegments(QVector<Segment> *segs, const QVector<KillEvent> &events, const QVector<GameResult> &games,

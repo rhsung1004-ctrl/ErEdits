@@ -20,6 +20,9 @@ public:
 	const QImage &image() const { return m_img; }
 	void setRoi(const QRectF &roi); // 0~1 비율
 	QRectF roi() const { return m_roi; }
+	// 0 = 자유 비율 (채팅창 영역 등). 기본은 킬 숫자 줄 5:1
+	void setAspect(double a) { m_aspect = a; }
+	void setLabel(const QString &t) { m_label = t; }
 
 signals:
 	void roiChanged(const QRectF &roi);
@@ -43,6 +46,8 @@ private:
 	enum { None, Draw, Move } m_drag = None;
 	QPointF m_anchor;   // 영상 픽셀
 	QRectF m_startRoi;  // 영상 픽셀
+	double m_aspect;
+	QString m_label;
 };
 
 class RoiDialog : public QDialog {

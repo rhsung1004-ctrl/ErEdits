@@ -2,6 +2,8 @@
 
 #include "AudioLevels.h"
 #include "ChzzkChat.h"
+#include "KillScanner.h"
+#include "RoiDialog.h"
 #include "Util.h"
 
 #include <QCheckBox>
@@ -18,7 +20,9 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QProcess>
 #include <QPushButton>
+#include <QSettings>
 #include <QSaveFile>
 #include <QSpinBox>
 #include <QTableWidget>
@@ -38,13 +42,34 @@ constexpr int kAiBatch = 30; // 한 번에 AI 로 확인할 후보 수
 } // namespace
 
 AiPanel::AiPanel(QWidget *parent)
-	: QWidget(parent), m_chzzk(new ChzzkChat(this)), m_audio(new AudioLevels(this)), m_ai(new LocalAi(this)),
-	  m_recalc(new QTimer(this))
+	: QWidget(parent), m_chatScan(new KillScanner(this)), m_chzzk(new ChzzkChat(this)), m_audio(new AudioLevels(this)),
+	  m_ai(new LocalAi(this)), m_recalc(new QTimer(this))
 {
 	m_recalc->setSingleShot(true);
 	m_recalc->setInterval(400);
 
-	// ── 채팅 ──
+	// ── 화면 채팅 (기본) ──
+	m_screenOn = new QCheckBox("킬 찾기 때 방송 화면 채팅창도 같이 보기");
+	m_screenOn->setChecked(QSettings().value("ai/screenChat", true).toBool());
+	m_screenOn->setToolTip("채팅창이 위로 밀려 올라가는 속도로 채팅이 몰린 순간을 찾아요 (정확하게 방식에서만)");
+	m_btnChatRect = button("채팅창 영역 지정…", "방송 화면에서 채팅 말풍선이 쌓이는 곳을 상자로 지정 (스트리머마다 한 번)");
+	m_btnScreenScan = button("화면 채팅만 분석", "이미 킬 찾기를 끝낸 영상에 화면 채팅만 따로 재요 (킬 결과는 그대로)");
+	m_screenStatus = new QLabel;
+	m_screenStatus->setWordWrap(true);
+	auto *screenBox = new QGroupBox("채팅 반응 — 방송 화면 채팅창");
+	auto *sl = new QVBoxLayout(screenBox);
+	auto *s1 = new QHBoxLayout;
+	s1->addWidget(m_screenOn);
+	s1->addStretch(1);
+	auto *s2 = new QHBoxLayout;
+	s2->addWidget(m_btnChatRect);
+	s2->addWidget(m_btnScreenScan);
+	s2->addStretch(1);
+	sl->addLayout(s1);
+	sl->addLayout(s2);
+	sl->addWidget(m_screenStatus);
+
+	// ── 치지직 채팅 (선택) ──
 	m_url = new QLineEdit;
 	m_url->setPlaceholderText("치지직 다시보기 주소 (https://chzzk.naver.com/video/1234567)");
 	m_btnChat = button("채팅 가져오기", "다시보기 채팅 전체를 받아 이 영상과 함께 저장해요 (한 번만)");
@@ -65,8 +90,16 @@ AiPanel::AiPanel(QWidget *parent)
 	m_chatStatus = new QLabel;
 	m_chatStatus->setWordWrap(true);
 
-	auto *chatBox = new QGroupBox("치지직 채팅");
-	auto *cl = new QVBoxLayout(chatBox);
+	auto *chatBox = new QGroupBox("(선택) 치지직 채팅 받기 — ㅋㅋ 내용까지 봐서 더 정확");
+	chatBox->setCheckable(true); // 체크를 끄면 접힘 (평소엔 화면 채팅만으로 충분)
+	auto *chatInner = new QWidget;
+	auto *cl = new QVBoxLayout(chatInner);
+	cl->setContentsMargins(0, 0, 0, 0);
+	auto *chatOuter = new QVBoxLayout(chatBox);
+	chatOuter->addWidget(chatInner);
+	m_chzzkBox = chatBox;
+	connect(chatBox, &QGroupBox::toggled, chatInner, &QWidget::setVisible);
+	chatBox->setChecked(false);
 	auto *r1 = new QHBoxLayout;
 	r1->addWidget(m_url, 1);
 	r1->addWidget(m_btnChat);
@@ -148,6 +181,7 @@ AiPanel::AiPanel(QWidget *parent)
 
 	auto *l = new QVBoxLayout(this);
 	l->setContentsMargins(6, 6, 6, 6);
+	l->addWidget(screenBox);
 	l->addWidget(chatBox);
 	auto *fr = new QHBoxLayout;
 	fr->addWidget(m_btnFind);
@@ -193,6 +227,25 @@ AiPanel::AiPanel(QWidget *parent)
 		save();
 	});
 	connect(m_btnFind, &QPushButton::clicked, this, &AiPanel::findPoints);
+	connect(m_screenOn, &QCheckBox::toggled, this, [](bool on) { QSettings().setValue("ai/screenChat", on); });
+	connect(m_btnChatRect, &QPushButton::clicked, this, &AiPanel::pickChatRect);
+	connect(m_btnScreenScan, &QPushButton::clicked, this, [this] {
+		if (m_chatScan->isRunning()) {
+			m_chatScan->cancel();
+			return;
+		}
+		scanScreenChat();
+	});
+	connect(m_chatScan, &KillScanner::progress, this, [this](double s, double d) {
+		m_screenStatus->setText(QString("화면 채팅 분석 중… %1 / %2").arg(formatTime(s, false), formatTime(d, false)));
+	});
+	connect(m_chatScan, &KillScanner::finished, this, [this](bool ok, const QString &msg) {
+		m_btnScreenScan->setText("화면 채팅만 분석");
+		if (m_chatScan->chatMeasured() && !m_chatScan->chatLines().isEmpty())
+			setScreenChat(m_chatScan->chatLines());
+		else if (!ok)
+			m_screenStatus->setText("<span style='color:#e9a'>" + msg + "</span>");
+	});
 	connect(m_audio, &AudioLevels::progress, this, [this](double s, double d) {
 		m_status->setText(QString("소리 크기 분석 중… %1 / %2").arg(formatTime(s, false), formatTime(d, false)));
 	});
@@ -255,7 +308,77 @@ AiPanel::~AiPanel() = default;
 
 bool AiPanel::isBusy() const
 {
-	return m_chzzk->isRunning() || m_audio->isRunning() || m_ai->isRunning();
+	return m_chzzk->isRunning() || m_audio->isRunning() || m_ai->isRunning() || m_chatScan->isRunning();
+}
+
+QRectF AiPanel::screenChatRect() const
+{
+	if (!m_screenOn->isChecked())
+		return {};
+	const QRectF r = QSettings().value("ai/chatRect", defaultChatRect()).toRectF();
+	return r.isValid() ? r : defaultChatRect();
+}
+
+void AiPanel::setScreenChat(const QVector<float> &lines)
+{
+	m_screen = lines;
+	save();
+	recompute();
+}
+
+void AiPanel::scanScreenChat()
+{
+	if (m_path.isEmpty())
+		return;
+	QRectF r = screenChatRect();
+	if (r.isEmpty())
+		r = QSettings().value("ai/chatRect", defaultChatRect()).toRectF();
+	m_chatScan->setResultDetection({});
+	m_chatScan->setChatDetection(r);
+	m_chatScan->start(m_path, QRectF(), m_duration, KillScanner::Precise); // 킬 영역 없이 = 채팅만
+	m_btnScreenScan->setText("⏹ 멈추기");
+	m_screenStatus->setText("화면 채팅 분석을 시작하는 중…");
+}
+
+void AiPanel::pickChatRect()
+{
+	if (m_path.isEmpty())
+		return;
+	const double t = m_now ? m_now() : m_duration / 2;
+	// 지금 장면 한 장 (채팅이 떠 있는 장면에서 누르세요)
+	QProcess ff;
+	ff.start(ffmpegPath(), {"-hide_banner", "-nostdin", "-loglevel", "error", "-ss", num(t), "-i", m_path, "-frames:v", "1",
+				"-f", "image2pipe", "-vcodec", "png", "-"});
+	ff.waitForFinished(20000);
+	const QImage img = QImage::fromData(ff.readAllStandardOutput(), "PNG");
+	if (img.isNull()) {
+		m_screenStatus->setText("<span style='color:#e9a'>장면을 가져오지 못했어요</span>");
+		return;
+	}
+	QDialog dlg(this);
+	dlg.setWindowTitle("채팅창 영역 지정");
+	auto *view = new FrameView;
+	view->setAspect(0);
+	view->setLabel("채팅창");
+	view->setImage(img);
+	view->setRoi(QSettings().value("ai/chatRect", defaultChatRect()).toRectF());
+	auto *help = new QLabel("채팅 말풍선이 쌓이는 곳을 끌어서 상자로 지정하세요. 말풍선 전체 폭이 들어가고, "
+				"위아래로 말풍선 4~6개가 들어가면 좋아요. (재생 위치를 채팅이 떠 있는 장면에 두고 열면 편해요)");
+	help->setWordWrap(true);
+	auto *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::RestoreDefaults);
+	connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+	connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+	connect(bb->button(QDialogButtonBox::RestoreDefaults), &QPushButton::clicked, view,
+		[view] { view->setRoi(defaultChatRect()); });
+	auto *l = new QVBoxLayout(&dlg);
+	l->addWidget(help);
+	l->addWidget(view, 1);
+	l->addWidget(bb);
+	dlg.resize(1100, 720);
+	if (dlg.exec() != QDialog::Accepted)
+		return;
+	QSettings().setValue("ai/chatRect", view->roi());
+	m_screenStatus->setText("채팅창 영역을 저장했어요. 다음 킬 찾기부터 쓰여요 (이미 분석한 영상은 [화면 채팅만 분석]).");
 }
 
 void AiPanel::setVideo(const QString &path, double duration, bool hasAudio, const QString &cacheFile)
@@ -263,6 +386,9 @@ void AiPanel::setVideo(const QString &path, double duration, bool hasAudio, cons
 	m_chzzk->cancel();
 	m_audio->cancel();
 	m_ai->cancel();
+	m_chatScan->cancel();
+	m_btnScreenScan->setText("화면 채팅만 분석");
+	m_screen.clear();
 	m_btnChat->setText("채팅 가져오기");
 	m_btnAi->setText("🤖 로컬 AI로 확인");
 	m_path = path;
@@ -277,7 +403,7 @@ void AiPanel::setVideo(const QString &path, double duration, bool hasAudio, cons
 	m_aiStatus->clear();
 	m_status->clear();
 	load();
-	if (!m_chat.isEmpty() || !m_loud.isEmpty())
+	if (!m_chat.isEmpty() || !m_loud.isEmpty() || !m_screen.isEmpty())
 		recompute();
 	refreshTable();
 	refreshStatus();
@@ -318,7 +444,7 @@ void AiPanel::recompute()
 	SignalParams p;
 	p.chatOffset = m_offset->value();
 	p.chatDelay = m_delay->value();
-	m_sig = computeSignals(m_chat, m_loud, m_duration, p);
+	m_sig = computeSignals(m_chat, m_screen, m_loud, m_duration, p);
 	QVector<Segment> segs = m_segments ? m_segments() : QVector<Segment>{};
 	const QVector<FunCandidate> old = m_cands;
 	m_cands = findFunCandidates(m_sig, m_chat, p, segs, m_duration);
@@ -350,7 +476,23 @@ void AiPanel::syncAdded(const QVector<Segment> &segs)
 void AiPanel::refreshStatus()
 {
 	QStringList parts;
-	parts << (m_chat.isEmpty() ? "채팅 없음" : QString("채팅 %1개").arg(m_chat.size()));
+	if (!m_chat.isEmpty())
+		parts << QString("받은 채팅 %1개").arg(m_chat.size());
+	else if (!m_screen.isEmpty())
+		parts << "화면 채팅";
+	else
+		parts << "채팅 없음";
+	if (!m_chatScan->isRunning()) {
+		double lines = 0;
+		for (float v : m_screen)
+			lines += v;
+		m_screenStatus->setText(m_screen.isEmpty()
+						? QString("화면 채팅: 아직 안 잼 — 킬 찾기(정확하게)를 하면 같이 재요%1")
+							  .arg(m_path.isEmpty() ? QString() : ", 이미 분석했으면 [화면 채팅만 분석]")
+						: QString("화면 채팅: 잼 (새 채팅 약 %1줄)%2")
+							  .arg(int(lines))
+							  .arg(m_chat.isEmpty() ? QString() : " · 받은 치지직 채팅이 있어서 그걸 먼저 써요"));
+	}
 	if (!m_hasAudio)
 		parts << "소리 없음";
 	else
@@ -367,6 +509,8 @@ void AiPanel::refreshStatus()
 	}
 	m_status->setText(parts.join(" · "));
 	m_btnFind->setEnabled(!m_path.isEmpty());
+	m_btnScreenScan->setEnabled(!m_path.isEmpty());
+	m_btnChatRect->setEnabled(!m_path.isEmpty());
 	m_btnBreaks->setEnabled(!m_cands.isEmpty());
 	m_btnAi->setEnabled(!m_cands.isEmpty() || m_ai->isRunning());
 	m_btnFill->setEnabled(!m_path.isEmpty());
@@ -521,6 +665,10 @@ void AiPanel::save()
 	for (float v : m_loud)
 		loud.append(std::round(v * 10) / 10);
 	o["loud"] = loud;
+	QJsonArray screen;
+	for (float v : m_screen)
+		screen.append(v);
+	o["screen"] = screen;
 	o["fun"] = funToJson(m_cands);
 	o["target"] = m_target->value();
 	o["every"] = m_every->value();
@@ -535,6 +683,7 @@ void AiPanel::load()
 {
 	const QSignalBlocker b1(m_offset), b2(m_delay);
 	m_url->clear();
+	m_chzzkBox->setChecked(false);
 	m_offset->setValue(0);
 	m_delay->setValue(5);
 	QFile f(m_cache);
@@ -542,11 +691,14 @@ void AiPanel::load()
 		return;
 	const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
 	m_url->setText(o["url"].toString());
+	m_chzzkBox->setChecked(!m_url->text().isEmpty());
 	m_offset->setValue(o["offset"].toDouble());
 	m_delay->setValue(o["delay"].toDouble(5));
 	m_chat = chatFromJson(o["chat"].toArray());
 	for (const auto &v : o["loud"].toArray())
 		m_loud.push_back(float(v.toDouble()));
+	for (const auto &v : o["screen"].toArray())
+		m_screen.push_back(float(v.toDouble()));
 	m_cands = funFromJson(o["fun"].toArray()); // AI 결과만 (recompute 가 옮겨 담음)
 	m_target->setValue(o["target"].toInt(20));
 	m_every->setValue(o["every"].toInt(3));

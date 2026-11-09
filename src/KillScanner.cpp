@@ -57,34 +57,55 @@ void KillScanner::launch(bool hwaccel)
 	m_found = 0;
 	m_results.reset();
 	m_withResults = !m_game.isEmpty();
+	m_withKill = !m_roi.isEmpty();
+	m_withChat = !m_chat.isEmpty() && m_mode == Precise;
+	m_chatMeter.reset();
+	m_chatLines.clear();
 
 	// 지정 영역만 잘라 160x32 로 줄이고 밝기만 (영역 비율로 자르므로 해상도와 무관)
-	const QString killChain = QString("crop=w='iw*%1':h='ih*%2':x='iw*%3':y='ih*%4',scale=%5:%6:flags=area,format=gray")
-					  .arg(num(m_roi.width()), num(m_roi.height()), num(m_roi.x()), num(m_roi.y()))
-					  .arg(HudKillWatcher::kW)
-					  .arg(HudKillWatcher::kH);
+	auto crop = [](const QRectF &r) {
+		return QString("crop=w='iw*%1':h='ih*%2':x='iw*%3':y='ih*%4'")
+			.arg(num(r.width()), num(r.height()), num(r.x()), num(r.y()));
+	};
+	const QString killChain = crop(m_roi) + QString(",scale=%1:%2:flags=area,format=gray")
+							.arg(HudKillWatcher::kW)
+							.arg(HudKillWatcher::kH);
 	QStringList args{"-hide_banner", "-nostdin", "-loglevel", "error"};
 	if (m_mode == Fast)
 		args << "-skip_frame" << "nokey";
 	if (hwaccel)
 		args << "-hwaccel" << "auto";
 	args << "-i" << m_path << "-an" << "-sn" << "-dn";
-	if (!m_withResults) {
+	if (m_withKill && !m_withResults && !m_withChat) {
 		args << "-vf" << QString("fps=%1,").arg(kRate) + killChain << "-f" << "rawvideo" << "-pix_fmt" << "gray"
 		     << "-";
 	} else {
-		// 같은 장면을 둘로 나눠: 킬 숫자(밝기 → RGB, 오른쪽을 검게 채워 너비 320) + 게임 화면 320x180 → 위아래로 붙임
-		const QString fc =
-			QString("[0:v]fps=%1,split=2[a][b];"
-				"[a]%2,format=rgb24,pad=%3:%4:0:0:black[k];"
-				"[b]crop=w='iw*%5':h='ih*%6':x='iw*%7':y='ih*%8',scale=%3:%9:flags=area,format=rgb24[r];"
-				"[k][r]vstack=inputs=2[out]")
-				.arg(kRate)
-				.arg(killChain)
-				.arg(rank::kSmallW)
-				.arg(HudKillWatcher::kH)
-				.arg(num(m_game.width()), num(m_game.height()), num(m_game.x()), num(m_game.y()))
-				.arg(rank::kSmallH);
+		// 같은 장면을 나눠 각각 잘라 너비 320 RGB 로 맞춘 뒤 위아래로 붙임
+		QStringList chains, labels;
+		const int W = rank::kSmallW;
+		if (m_withKill)
+			chains << QString("%1,format=rgb24,pad=%2:%3:0:0:black").arg(killChain).arg(W).arg(HudKillWatcher::kH);
+		if (m_withResults)
+			chains << crop(m_game) + QString(",scale=%1:%2:flags=area,format=rgb24").arg(W).arg(rank::kSmallH);
+		if (m_withChat)
+			chains << crop(m_chat) + QString(",scale=%1:%2:flags=area,format=gray,format=rgb24,pad=%3:%2:0:0:black")
+							 .arg(ChatMeter::kW)
+							 .arg(ChatMeter::kH)
+							 .arg(W);
+		QString fc = QString("[0:v]fps=%1").arg(kRate);
+		if (chains.size() == 1) {
+			fc += "," + chains[0] + "[out]";
+		} else {
+			fc += QString(",split=%1").arg(chains.size());
+			for (int i = 0; i < chains.size(); ++i)
+				fc += QString("[s%1]").arg(i);
+			fc += ";";
+			for (int i = 0; i < chains.size(); ++i)
+				fc += QString("[s%1]%2[p%1];").arg(i).arg(chains[i]);
+			for (int i = 0; i < chains.size(); ++i)
+				fc += QString("[p%1]").arg(i);
+			fc += QString("vstack=inputs=%1[out]").arg(chains.size());
+		}
 		args << "-filter_complex" << fc << "-map" << "[out]" << "-f" << "rawvideo" << "-pix_fmt" << "rgb24" << "-";
 	}
 	setQuietProcess(m_proc, true);
@@ -94,8 +115,10 @@ void KillScanner::launch(bool hwaccel)
 void KillScanner::onData()
 {
 	m_buf += m_proc.readAllStandardOutput();
-	const int kw = HudKillWatcher::kW, kh = HudKillWatcher::kH;
-	const int fsz = m_withResults ? rank::kSmallW * (kh + rank::kSmallH) * 3 : kw * kh;
+	const int kw = HudKillWatcher::kW, kh = HudKillWatcher::kH, W = rank::kSmallW;
+	const bool packed = !(m_withKill && !m_withResults && !m_withChat);
+	const int rows = (m_withKill ? kh : 0) + (m_withResults ? rank::kSmallH : 0) + (m_withChat ? ChatMeter::kH : 0);
+	const int fsz = packed ? W * rows * 3 : kw * kh;
 	const int n = int(m_buf.size() / fsz);
 	if (n <= 0)
 		return;
@@ -104,16 +127,34 @@ void KillScanner::onData()
 	for (int i = 0; i < n; ++i) {
 		const double t = double(m_frames) / kRate;
 		const auto *frame = reinterpret_cast<const uint8_t *>(m_buf.constData()) + size_t(i) * fsz;
-		if (!m_withResults) {
+		if (!packed) {
 			m_watcher.feed(frame, t, &events);
 		} else {
-			// 위 32줄 왼쪽 160칸 = 킬 숫자 밝기 (R=G=B)
-			m_gray.resize(size_t(kw * kh));
-			for (int y = 0; y < kh; ++y)
-				for (int x = 0; x < kw; ++x)
-					m_gray[size_t(y * kw + x)] = frame[(size_t(y) * rank::kSmallW + size_t(x)) * 3];
-			m_watcher.feed(m_gray.data(), t, &events);
-			m_results.feed(frame + size_t(kh) * rank::kSmallW * 3, t, &cands);
+			const uint8_t *part = frame;
+			if (m_withKill) {
+				// 킬 숫자 밝기 (R=G=B), 왼쪽 160칸
+				m_gray.resize(size_t(kw * kh));
+				for (int y = 0; y < kh; ++y)
+					for (int x = 0; x < kw; ++x)
+						m_gray[size_t(y * kw + x)] = part[(size_t(y) * W + size_t(x)) * 3];
+				m_watcher.feed(m_gray.data(), t, &events);
+				part += size_t(kh) * W * 3;
+			}
+			if (m_withResults) {
+				m_results.feed(part, t, &cands);
+				part += size_t(rank::kSmallH) * W * 3;
+			}
+			if (m_withChat) {
+				m_chatGray.resize(size_t(ChatMeter::kW * ChatMeter::kH));
+				for (int y = 0; y < ChatMeter::kH; ++y)
+					for (int x = 0; x < ChatMeter::kW; ++x)
+						m_chatGray[size_t(y * ChatMeter::kW + x)] = part[(size_t(y) * W + size_t(x)) * 3];
+				const int fresh = m_chatMeter.feed(m_chatGray.data());
+				const int sec = int(t);
+				if (m_chatLines.size() <= sec)
+					m_chatLines.resize(sec + 1);
+				m_chatLines[sec] += float(fresh);
+			}
 		}
 		++m_frames;
 	}
