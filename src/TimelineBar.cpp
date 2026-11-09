@@ -91,7 +91,7 @@ void TimelineBar::paintEvent(QPaintEvent *)
 	}
 	// 킬 표시
 	for (const KillEvent &e : m_events) {
-		if (!e.kill && !(m_assist && e.assist))
+		if (!e.counts() || (!e.kill && !(m_assist && e.assist)))
 			continue;
 		const double x = toX(e.time);
 		p.setPen(QPen(e.kill ? QColor(230, 50, 50) : QColor(80, 190, 230), 2));

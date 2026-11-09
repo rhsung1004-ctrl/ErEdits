@@ -109,6 +109,26 @@ QRectF defaultKillRoi(int videoW, int videoH)
 	return QRectF(x / videoW, y / videoH, w / videoW, h / videoH);
 }
 
+QRectF gameRectFromKillRoi(const QRectF &roi, int videoW, int videoH)
+{
+	const QRectF full(0, 0, 1, 1);
+	if (videoW <= 0 || videoH <= 0 || roi.height() <= 0)
+		return full;
+	const double u = roi.height() * videoH / HudKillWatcher::kH; // 게임 화면 높이 720 기준 1px
+	const double gw = 1280 * u, gh = 720 * u;
+	const double right = (roi.x() + roi.width()) * videoW + HudKillWatcher::kRoiRight * u;
+	const double top = roi.y() * videoH - HudKillWatcher::kRoiTop * u;
+	QRectF g((right - gw) / videoW, top / videoH, gw / videoW, gh / videoH);
+	// 게임 화면이 영상보다 크거나 너무 작으면 계산을 믿지 않음
+	if (g.width() > 1.08 || g.height() > 1.08 || g.width() < 0.3 || g.height() < 0.3)
+		return full;
+	// 영상 전체와 거의 같으면 (상자를 손으로 맞춘 오차) 영상 전체
+	if (std::abs(g.width() - 1) < 0.06 && std::abs(g.height() - 1) < 0.06 && std::abs(g.x()) < 0.04 &&
+	    std::abs(g.y()) < 0.04)
+		return full;
+	return g.intersected(full);
+}
+
 QString num(double v)
 {
 	return QString::number(v, 'f', 6);

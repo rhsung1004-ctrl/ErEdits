@@ -1,7 +1,10 @@
 #pragma once
 
 #include "Exporter.h"
+#include "Games.h"
 #include "KillScanner.h"
+#include "KillVerifier.h"
+#include "RankReader.h"
 #include "Segments.h"
 #include "Util.h"
 
@@ -16,9 +19,12 @@ class QLabel;
 class QMediaPlayer;
 class QProgressBar;
 class QPushButton;
+class QSpinBox;
 class QTableWidget;
 class SubtitlePanel;
 class VideoView;
+class EditTimeline;
+class Thumbs;
 class TimelineBar;
 
 class MainWindow : public QMainWindow {
@@ -39,6 +45,7 @@ private:
 	void chooseRoi();
 	void startScan();
 	void onScanFinished(bool ok, const QString &msg);
+	void startVerify();
 	void rebuildSegments(bool force);
 	void refreshTable();
 	void refreshSummary();
@@ -54,6 +61,24 @@ private:
 	void subtitlesChanged();
 	QVector<Segment> enabledSegments() const;
 	SegmentParams params() const;
+
+	// 판 등수
+	QWidget *buildRankTab();
+	QRectF gameRect() const;
+	GameFilter gameFilter() const;
+	void startRankRead();
+	void rebuildGames(bool applyToClips = true);
+	void refreshGameTable();
+	void gameFilterChanged();
+	void saveGameLog();
+
+	// 컷 편집
+	void pushUndo();
+	void undo();
+	void redo();
+	void recountSegments(); // 클립마다 안에 든 킬·어시 수 다시 세기
+	void splitAtPlayhead();
+	void requestThumbs();
 
 	// 분석 결과를 영상별로 저장 (몇 시간짜리를 다시 분석하지 않게)
 	QString cachePath() const;
@@ -74,7 +99,17 @@ private:
 	bool m_scanComplete = false;
 	double m_playEnd = -1;     // 구간 미리보기 끝
 
+	// 판 등수 결과
+	QVector<ResultCandidate> m_cands;  // 결과 화면 후보 (분석 중 찾음)
+	QVector<RankReading> m_readings;   // 후보에서 읽은 등수
+	QVector<GameResult> m_games;       // 판 목록 (직접 고친 값 포함)
+	bool m_readsDone = false;          // 후보를 모두 읽었는지
+
 	KillScanner *m_scanner;
+	RankReader *m_rankReader;
+	KillVerifier *m_verifier;
+	Thumbs *m_thumbs;
+	QVector<QVector<Segment>> m_undo, m_redo;
 	Exporter *m_exporter;
 
 	// 화면
@@ -83,6 +118,10 @@ private:
 	VideoView *m_view;
 	SubtitlePanel *m_subPanel;
 	TimelineBar *m_timeline;
+	EditTimeline *m_editTl;
+	QCheckBox *m_resultOnly;
+	QPushButton *m_btnUndo;
+	QPushButton *m_btnRedo;
 	QPushButton *m_btnPlay;
 	QLabel *m_posLabel;
 	QLabel *m_fileLabel;
@@ -90,6 +129,7 @@ private:
 	QLabel *m_roiLabel;
 	QComboBox *m_scanMode;
 	QPushButton *m_btnScan;
+	QPushButton *m_btnVerify;
 	QProgressBar *m_scanProgress;
 	QLabel *m_scanStatus;
 
@@ -106,5 +146,16 @@ private:
 	QProgressBar *m_exportProgress;
 	QLabel *m_exportStatus;
 
+	QCheckBox *m_rankFilter;
+	QSpinBox *m_maxRank;
+	QCheckBox *m_keepUnknown;
+	QComboBox *m_gameArea;
+	QTableWidget *m_gameTable;
+	QLabel *m_rankStatus;
+	QPushButton *m_btnReadRanks;
+	QPushButton *m_btnResetGames;
+	QPushButton *m_btnSaveLog;
+
 	bool m_fillingTable = false;
+	bool m_fillingGames = false;
 };
