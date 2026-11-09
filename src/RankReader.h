@@ -2,14 +2,14 @@
 
 #include "Games.h"
 
-#include <QByteArray>
 #include <QObject>
-#include <QProcess>
 #include <QRectF>
 
-// 2단계: 결과 화면 후보마다 원본 장면을 한 장씩 꺼내(ffmpeg) 등수를 읽음
+class FrameGrabber;
+
+// 2단계: 결과 화면 후보마다 원본 장면을 한 장씩 꺼내 등수를 읽음
 //  - 게임 화면 영역만 잘라 1920x1080 으로 맞춘 뒤 rank::readRank
-//  - 가운데 장면에서 못 읽으면 후보 구간의 앞·뒤 장면으로 한 번씩 더
+//  - 1차: 후보 가운데 장면 전부 (10장씩 묶어서) → 못 읽은 후보만 2차: 처음·마지막 장면
 class RankReader : public QObject {
 	Q_OBJECT
 public:
@@ -26,18 +26,15 @@ signals:
 	void finished(bool ok, const QVector<RankReading> &readings);
 
 private:
-	void next();
-	void onFinished(int code, QProcess::ExitStatus st);
+	void runRound(int round);
 
-	QProcess m_proc;
+	FrameGrabber *m_grab;
 	QString m_path;
 	QRectF m_game;
 	QVector<ResultCandidate> m_cands;
-	QVector<RankReading> m_out;
-	QByteArray m_buf;
-	int m_index = 0;
-	int m_try = 0; // 0 가운데, 1 앞, 2 뒤
-	double m_time = 0;
+	QVector<QVector<RankReading>> m_found; // 후보마다 읽은 것 (가장 먼저 읽힌 하나)
+	QVector<QPair<int, double>> m_asked;   // 이번 차례 장면 번호 → (후보 번호, 시각)
+	int m_round = 0;
+	int m_done = 0;
 	bool m_running = false;
-	bool m_cancelled = false;
 };

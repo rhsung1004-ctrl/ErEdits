@@ -2,6 +2,7 @@
 
 #include "AiPanel.h"
 #include "EditTimeline.h"
+#include "JoinedPlayer.h"
 #include "RoiDialog.h"
 #include "Thumbs.h"
 #include "SubtitlePanel.h"
@@ -26,7 +27,9 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QDialogButtonBox>
 #include <QInputDialog>
+#include <QListWidget>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
@@ -36,6 +39,7 @@
 #include <QProgressBar>
 #include <QProcess>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSettings>
 #include <QShortcut>
 #include <QSpinBox>
@@ -163,7 +167,7 @@ void MainWindow::buildUi()
 	QSettings st;
 
 	// ── 왼쪽: 미리보기 ──
-	m_player = new QMediaPlayer(this);
+	m_player = new JoinedPlayer(this);
 	m_audio = new QAudioOutput(this);
 	m_player->setAudioOutput(m_audio);
 	m_view = new VideoView;
@@ -377,7 +381,7 @@ void MainWindow::buildUi()
 	l2->addWidget(m_summary);
 
 	// ── 3. 내보내기 ──
-	auto *g3 = new QGroupBox("3. 내보내기 (16:9)");
+	auto *g3 = new QWidget; // 내보내기 설정 (탭)
 	m_xfade = spin(0, 3, 0.1, st.value("xfade", 0.5).toDouble(), " 초", 2);
 	m_xfade->setToolTip("클립과 클립 사이를 겹치며 넘어가는 시간 (0 이면 그냥 이어 붙임)");
 	m_fadeIn = spin(0, 5, 0.1, st.value("fadeIn", 1.0).toDouble(), " 초", 2);
@@ -397,6 +401,9 @@ void MainWindow::buildUi()
 	m_fps->setCurrentIndex(std::max(0, m_fps->findData(st.value("fps", 0).toInt())));
 	m_cpuOnly = new QCheckBox("CPU로만 인코딩 (그래픽카드 인코더에서 문제가 생길 때)");
 	m_cpuOnly->setChecked(st.value("cpuOnly", false).toBool());
+	m_loudnorm = new QCheckBox("소리 크기 맞추기 (유튜브 기준 -14 LUFS)");
+	m_loudnorm->setToolTip("클립마다 들쭉날쭉한 소리 크기를 전체적으로 고르게 맞춰요");
+	m_loudnorm->setChecked(st.value("loudnorm", true).toBool());
 	m_btnExport = new QPushButton("💾 영상 내보내기…");
 	m_btnExport->setStyleSheet("font-weight:bold; padding:5px;");
 	m_exportProgress = new QProgressBar;
@@ -419,12 +426,20 @@ void MainWindow::buildUi()
 	rr->addWidget(new QLabel("프레임"));
 	rr->addWidget(m_fps, 1);
 	auto *l3 = new QVBoxLayout(g3);
+	l3->setContentsMargins(6, 6, 6, 6);
+	l3->addWidget(new QLabel("<b>16:9 한 편으로 내보내기</b> — 아래 [영상 내보내기]는 어느 탭에서든 누를 수 있어요"));
 	l3->addLayout(fr);
 	l3->addLayout(rr);
+	l3->addWidget(m_loudnorm);
 	l3->addWidget(m_cpuOnly);
-	l3->addWidget(m_btnExport);
-	l3->addWidget(m_exportProgress);
-	l3->addWidget(m_exportStatus);
+	l3->addStretch(1);
+	// 내보내기 버튼·진행은 탭 아래 항상 보이게
+	auto *exportBar = new QWidget;
+	auto *eb = new QVBoxLayout(exportBar);
+	eb->setContentsMargins(0, 0, 0, 0);
+	eb->addWidget(m_btnExport);
+	eb->addWidget(m_exportProgress);
+	eb->addWidget(m_exportStatus);
 
 	auto *right = new QWidget;
 	auto *rl = new QVBoxLayout(right);
@@ -436,7 +451,11 @@ void MainWindow::buildUi()
 	m_aiPanel = new AiPanel;
 	m_aiPanel->setSegmentsProvider([this] { return m_segs; });
 	m_aiPanel->setTimeProvider([this] { return m_player->position() / 1000.0; });
-	tabs->addTab(m_aiPanel, "AI 편집점");
+	auto *aiScroll = new QScrollArea; // 내용이 길어서 창이 작으면 스크롤
+	aiScroll->setWidget(m_aiPanel);
+	aiScroll->setWidgetResizable(true);
+	aiScroll->setFrameShape(QFrame::NoFrame);
+	tabs->addTab(aiScroll, "AI 편집점");
 	connect(m_aiPanel, &AiPanel::signalsChanged, this, [this] {
 		scoreSegments(&m_segs, m_events, m_games, m_aiPanel->sig());
 		refreshTable();
@@ -467,8 +486,9 @@ void MainWindow::buildUi()
 		m_player->play();
 	});
 	tabs->addTab(m_subPanel, "자막");
+	tabs->addTab(g3, "3. 내보내기");
 	rl->addWidget(tabs, 1);
-	rl->addWidget(g3);
+	rl->addWidget(exportBar);
 	right->setMinimumWidth(520);
 
 	auto *split = new QSplitter;
@@ -525,6 +545,7 @@ void MainWindow::buildUi()
 		s.setValue("res", m_res->currentData());
 		s.setValue("fps", m_fps->currentData());
 		s.setValue("cpuOnly", m_cpuOnly->isChecked());
+		s.setValue("loudnorm", m_loudnorm->isChecked());
 		refreshSummary();
 	};
 	connect(m_xfade, &QDoubleSpinBox::valueChanged, this, exportChanged);
@@ -533,6 +554,7 @@ void MainWindow::buildUi()
 	connect(m_res, &QComboBox::currentIndexChanged, this, exportChanged);
 	connect(m_fps, &QComboBox::currentIndexChanged, this, exportChanged);
 	connect(m_cpuOnly, &QCheckBox::toggled, this, exportChanged);
+	connect(m_loudnorm, &QCheckBox::toggled, this, exportChanged);
 	connect(m_btnExport, &QPushButton::clicked, this, [this] {
 		if (m_exporter->isRunning())
 			m_exporter->cancel();
@@ -576,10 +598,10 @@ void MainWindow::buildUi()
 			m_player->play();
 		}
 	});
-	connect(m_player, &QMediaPlayer::playbackStateChanged, this, [this](QMediaPlayer::PlaybackState s) {
+	connect(m_player, &JoinedPlayer::playbackStateChanged, this, [this](QMediaPlayer::PlaybackState s) {
 		m_btnPlay->setText(s == QMediaPlayer::PlayingState ? "⏸" : "▶");
 	});
-	connect(m_player, &QMediaPlayer::positionChanged, this, [this](qint64 ms) {
+	connect(m_player, &JoinedPlayer::positionChanged, this, [this](qint64 ms) {
 		const double t = ms / 1000.0;
 		m_timeline->setPosition(t);
 		m_editTl->setSourcePosition(t);
@@ -655,11 +677,61 @@ void MainWindow::subtitlesChanged()
 void MainWindow::chooseVideo()
 {
 	QSettings s;
-	const QString path = QFileDialog::getOpenFileName(
-		this, "방송 다시보기 영상 열기", s.value("lastDir").toString(),
+	const QStringList files = QFileDialog::getOpenFileNames(
+		this, "방송 다시보기 영상 열기 (여러 파일로 나뉜 방송은 함께 고르세요)", s.value("lastDir").toString(),
 		"영상 (*.mp4 *.mkv *.ts *.flv *.mov *.webm *.m4v *.avi);;모든 파일 (*)");
-	if (!path.isEmpty())
-		openVideo(path);
+	openFiles(files);
+}
+
+void MainWindow::openFiles(QStringList files)
+{
+	if (files.isEmpty())
+		return;
+	if (files.size() == 1) {
+		openVideo(files.first());
+		return;
+	}
+	// 파일 이름(녹화 시각) 순으로 늘어놓고 순서를 확인받음
+	std::sort(files.begin(), files.end(), [](const QString &a, const QString &b) {
+		return QString::compare(QFileInfo(a).fileName(), QFileInfo(b).fileName(), Qt::CaseInsensitive) < 0;
+	});
+	QDialog dlg(this);
+	dlg.setWindowTitle("여러 파일을 한 방송으로 묶기");
+	auto *help = new QLabel("한 방송이 여러 파일로 나뉜 것을 이 순서대로 이어 붙여 하나의 영상처럼 편집해요.\n"
+				"순서가 틀렸으면 끌어서 바꾸세요. (같은 파일들을 다시 고르면 이전 분석·편집이 그대로 열려요)");
+	help->setWordWrap(true);
+	auto *list = new QListWidget;
+	list->setDragDropMode(QAbstractItemView::InternalMove);
+	for (const QString &f : files) {
+		auto *it = new QListWidgetItem(QFileInfo(f).fileName());
+		it->setData(Qt::UserRole, f);
+		it->setToolTip(QDir::toNativeSeparators(f));
+		list->addItem(it);
+	}
+	auto *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+	bb->button(QDialogButtonBox::Ok)->setText("묶어서 열기");
+	connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+	connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+	auto *l = new QVBoxLayout(&dlg);
+	l->addWidget(help);
+	l->addWidget(list, 1);
+	l->addWidget(bb);
+	dlg.resize(520, 360);
+	if (dlg.exec() != QDialog::Accepted)
+		return;
+	QStringList ordered;
+	for (int i = 0; i < list->count(); ++i)
+		ordered << list->item(i)->data(Qt::UserRole).toString();
+	QApplication::setOverrideCursor(Qt::WaitCursor);
+	QString err;
+	const QString joined = makeJoined(ordered, &err);
+	QApplication::restoreOverrideCursor();
+	if (joined.isEmpty()) {
+		QMessageBox::warning(this, "묶을 수 없음", err);
+		return;
+	}
+	QSettings().setValue("lastDir", QFileInfo(ordered.first()).absolutePath());
+	openVideo(joined);
 }
 
 void MainWindow::openVideo(const QString &path)
@@ -675,7 +747,8 @@ void MainWindow::openVideo(const QString &path)
 		QMessageBox::warning(this, "열 수 없음", info.error);
 		return;
 	}
-	QSettings().setValue("lastDir", QFileInfo(path).absolutePath());
+	if (!isJoined(path))
+		QSettings().setValue("lastDir", QFileInfo(path).absolutePath());
 	m_path = path;
 	m_info = info;
 	m_rankReader->cancel();
@@ -704,8 +777,23 @@ void MainWindow::openVideo(const QString &path)
 		m_roi = defaultKillRoi(info.width, info.height);
 	}
 
+	QVector<double> bounds;
+	QString tip;
+	if (isJoined(path)) {
+		const auto parts = readJoined(path);
+		QStringList names;
+		for (int i = 0; i < parts.size(); ++i) {
+			if (i > 0)
+				bounds.push_back(parts[i].offset);
+			names << QString("%1. %2 (%3부터)").arg(i + 1).arg(QFileInfo(parts[i].file).fileName(),
+								      formatTime(parts[i].offset, false));
+		}
+		tip = "이어 붙인 파일:\n" + names.join("\n");
+	}
+	m_timeline->setBoundaries(bounds);
+	m_fileLabel->setToolTip(tip);
 	m_fileLabel->setText(QString("<b>%1</b> · %2×%3 · %4fps · %5%6")
-				     .arg(QFileInfo(path).fileName().toHtmlEscaped())
+				     .arg(displayName(path).toHtmlEscaped())
 				     .arg(info.width)
 				     .arg(info.height)
 				     .arg(QString::number(info.fps, 'g', 4))
@@ -749,9 +837,11 @@ void MainWindow::dragEnterEvent(QDragEnterEvent *e)
 
 void MainWindow::dropEvent(QDropEvent *e)
 {
-	const auto urls = e->mimeData()->urls();
-	if (!urls.isEmpty() && urls.first().isLocalFile())
-		openVideo(urls.first().toLocalFile());
+	QStringList files;
+	for (const QUrl &u : e->mimeData()->urls())
+		if (u.isLocalFile())
+			files << u.toLocalFile();
+	openFiles(files);
 }
 
 void MainWindow::closeEvent(QCloseEvent *e)
@@ -1120,6 +1210,7 @@ void MainWindow::startExport()
 	s.fadeIn = m_fadeIn->value();
 	s.fadeOut = m_fadeOut->value();
 	s.cpuOnly = m_cpuOnly->isChecked();
+	s.normalizeAudio = m_loudnorm->isChecked();
 	s.outPath = out;
 	m_player->pause();
 	m_exportProgress->setValue(0);

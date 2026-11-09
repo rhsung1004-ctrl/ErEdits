@@ -85,6 +85,12 @@ void TimelineBar::paintEvent(QPaintEvent *)
 			c = fun ? QColor(130, 235, 200) : QColor(255, 220, 90);
 		p.fillRect(QRectF(x0, bar.top() + 3, x1 - x0, bar.height() - 7), c);
 	}
+	// 파일 경계
+	for (double b : m_bounds) {
+		const double x = toX(b);
+		p.setPen(QPen(QColor(230, 230, 235), 1, Qt::DashLine));
+		p.drawLine(QPointF(x, bar.top() - 6), QPointF(x, bar.bottom() + 2));
+	}
 	// 자막 (막대 아래쪽 보라색)
 	for (const Subtitle &sb : m_subs) {
 		const double x0 = toX(sb.start), x1 = std::max(toX(sb.end), x0 + 2);

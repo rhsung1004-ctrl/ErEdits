@@ -336,8 +336,8 @@ void RoiDialog::requestFrame(double t)
 	}
 	m_grabBuf.clear();
 	setQuietProcess(m_grab, false);
-	m_grab.start(ffmpegPath(), {"-hide_banner", "-nostdin", "-loglevel", "error", "-ss", QString::number(t, 'f', 2),
-				    "-i", m_path, "-frames:v", "1", "-an", "-f", "image2pipe", "-c:v", "png", "-"});
+	m_grab.start(ffmpegPath(), QStringList{"-hide_banner", "-nostdin", "-loglevel", "error", "-ss", QString::number(t, 'f', 2)} +
+					   inputArgs(m_path) + QStringList{"-frames:v", "1", "-an", "-f", "image2pipe", "-c:v", "png", "-"});
 }
 
 void RoiDialog::updateProbe()

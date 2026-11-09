@@ -36,6 +36,8 @@ add_executable(ERKillCut WIN32
   src/LocalAi.h         src/LocalAi.cpp
   src/AiPanel.h         src/AiPanel.cpp
   src/ChatMeter.h       src/ChatMeter.cpp
+  src/FrameGrabber.h    src/FrameGrabber.cpp
+  src/JoinedPlayer.h    src/JoinedPlayer.cpp
 )
 
 target_link_libraries(ERKillCut PRIVATE Qt6::Widgets Qt6::Multimedia Qt6::Network)
@@ -52,7 +54,8 @@ if(ERKILLCUT_TESTS)
     src/HudKillWatcher.cpp src/KillScanner.cpp src/Segments.cpp src/Exporter.cpp src/Util.cpp
     src/FontManager.cpp src/Subtitles.cpp src/ComboColors.h src/ComboColors.cpp
     src/ResultScreen.cpp src/Games.cpp src/RankReader.cpp src/KillVerifier.cpp
-    src/Highlights.cpp src/ChzzkChat.cpp src/AudioLevels.cpp src/LocalAi.cpp src/ChatMeter.cpp)
+    src/Highlights.cpp src/ChzzkChat.cpp src/AudioLevels.cpp src/LocalAi.cpp src/ChatMeter.cpp
+    src/FrameGrabber.cpp)
   target_include_directories(erkillcut_cli PRIVATE src)
   target_link_libraries(erkillcut_cli PRIVATE Qt6::Gui Qt6::Network)
 endif()

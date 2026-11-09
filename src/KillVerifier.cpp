@@ -1,5 +1,6 @@
 #include "KillVerifier.h"
 
+#include "FrameGrabber.h"
 #include "HudKillWatcher.h"
 #include "ResultScreen.h"
 #include "Util.h"
@@ -11,20 +12,33 @@ constexpr int kW = HudKillWatcher::kW * rank::kHudScale; // 960
 constexpr int kH = HudKillWatcher::kH * rank::kHudScale; // 192
 } // namespace
 
-KillVerifier::KillVerifier(QObject *parent) : QObject(parent)
+KillVerifier::KillVerifier(QObject *parent) : QObject(parent), m_grab(new FrameGrabber(this))
 {
-	connect(&m_proc, &QProcess::readyReadStandardOutput, this, [this] { m_buf += m_proc.readAllStandardOutput(); });
-	connect(&m_proc, &QProcess::finished, this, &KillVerifier::onFinished);
+	connect(m_grab, &FrameGrabber::frame, this, [this](int k, const QByteArray &rgb) {
+		if (!m_running || k < 0 || k >= m_asked.size())
+			return;
+		const auto [i, slot] = m_asked[k];
+		Read r;
+		if (rgb.size() >= qsizetype(kW) * kH * 3)
+			r.ok = rank::readHudCounts(reinterpret_cast<const uint8_t *>(rgb.constData()), kW, kH, r.v, &r.weak);
+		m_reads[i][size_t(slot)] = r;
+		emit progress(++m_done, m_total);
+	});
+	connect(m_grab, &FrameGrabber::finished, this, [this] {
+		if (!m_running)
+			return;
+		if (m_round == 1) {
+			runRound(2);
+			return;
+		}
+		for (int i = 0; i < m_events.size(); ++i)
+			decide(i);
+		m_running = false;
+		emit finished(m_events);
+	});
 }
 
-KillVerifier::~KillVerifier()
-{
-	m_cancelled = true;
-	if (m_proc.state() != QProcess::NotRunning) {
-		m_proc.kill();
-		m_proc.waitForFinished(3000);
-	}
-}
+KillVerifier::~KillVerifier() = default;
 
 void KillVerifier::start(const QString &path, const QRectF &roi, const QVector<KillEvent> &events)
 {
@@ -33,25 +47,19 @@ void KillVerifier::start(const QString &path, const QRectF &roi, const QVector<K
 	m_roi = roi;
 	m_events = events;
 	std::sort(m_events.begin(), m_events.end(), [](const KillEvent &a, const KillEvent &b) { return a.time < b.time; });
-	m_index = 0;
-	m_slot = 0;
-	for (Read &r : m_reads)
-		r = Read{};
-	m_cancelled = false;
+	m_reads = QVector<std::array<Read, 4>>(m_events.size());
+	m_done = 0;
+	m_total = int(m_events.size()) * 2;
 	m_running = true;
-	next();
+	runRound(1);
 }
 
 void KillVerifier::cancel()
 {
 	if (!m_running)
 		return;
-	m_cancelled = true;
-	if (m_proc.state() != QProcess::NotRunning) {
-		m_proc.kill();
-		m_proc.waitForFinished(3000);
-	}
 	m_running = false;
+	m_grab->cancel();
 }
 
 double KillVerifier::slotTime(int i, int slot) const
@@ -75,78 +83,43 @@ double KillVerifier::slotTime(int i, int slot) const
 	}
 }
 
-void KillVerifier::next()
+void KillVerifier::runRound(int round)
 {
-	if (m_cancelled)
-		return;
-	if (m_index >= m_events.size()) {
-		m_running = false;
-		emit progress(int(m_events.size()), int(m_events.size()));
-		emit finished(m_events);
-		return;
+	m_round = round;
+	m_asked.clear();
+	QVector<double> times;
+	for (int i = 0; i < m_events.size(); ++i) {
+		QVector<int> want;
+		if (round == 1) {
+			want = {0, 1};
+		} else {
+			const Read &b = m_reads[i][0], &a = m_reads[i][1];
+			const bool sameKA = b.ok && a.ok && b.v[1] == a.v[1] && b.v[2] == a.v[2];
+			if (!b.ok || sameKA)
+				want.push_back(2); // 앞을 다시 (못 읽었거나, 그대로라서 확인)
+			if (!a.ok || sameKA)
+				want.push_back(3);
+		}
+		for (int s : want) {
+			m_asked.push_back({i, s});
+			times.push_back(slotTime(i, s));
+		}
 	}
-	grab(slotTime(m_index, m_slot));
-}
-
-void KillVerifier::grab(double t)
-{
+	if (round == 2)
+		m_total = m_done + int(times.size());
 	const QString vf = QString("crop=w='iw*%1':h='ih*%2':x='iw*%3':y='ih*%4',scale=%5:%6:flags=bicubic")
 				   .arg(num(m_roi.width()), num(m_roi.height()), num(m_roi.x()), num(m_roi.y()))
 				   .arg(kW)
 				   .arg(kH);
-	m_buf.clear();
-	setQuietProcess(m_proc, false);
-	m_proc.start(ffmpegPath(), {"-hide_banner", "-nostdin", "-loglevel", "error", "-ss", num(t), "-i", m_path,
-				    "-frames:v", "1", "-an", "-sn", "-dn", "-vf", vf, "-f", "rawvideo", "-pix_fmt",
-				    "rgb24", "-"});
+	m_grab->start(m_path, times, vf, kW, kH); // 비어 있어도 finished 가 옴
 }
 
-void KillVerifier::onFinished(int, QProcess::ExitStatus)
+void KillVerifier::decide(int index)
 {
-	if (m_cancelled)
-		return;
-	m_buf += m_proc.readAllStandardOutput();
-	Read r;
-	if (m_buf.size() >= qsizetype(kW) * kH * 3)
-		r.ok = rank::readHudCounts(reinterpret_cast<const uint8_t *>(m_buf.constData()), kW, kH, r.v, &r.weak);
-	m_buf.clear();
-	m_reads[m_slot] = r;
-
-	// 다음에 읽을 장면 정하기
-	int nextSlot = -1;
-	const Read &b = m_reads[0], &a = m_reads[1];
-	if (m_slot == 0) {
-		nextSlot = 1;
-	} else if (m_slot == 1) {
-		const bool same = b.ok && a.ok && b.v[1] == a.v[1] && b.v[2] == a.v[2];
-		if (!b.ok || same)
-			nextSlot = 2; // 앞을 다시 (못 읽었거나, 그대로라서 확인)
-		else if (!a.ok)
-			nextSlot = 3;
-	} else if (m_slot == 2) {
-		const bool same = b.ok && a.ok && b.v[1] == a.v[1] && b.v[2] == a.v[2];
-		if (!a.ok || same)
-			nextSlot = 3;
-	}
-	if (nextSlot >= 0) {
-		m_slot = nextSlot;
-		next();
-		return;
-	}
-	decide();
-	for (Read &x : m_reads)
-		x = Read{};
-	m_slot = 0;
-	++m_index;
-	emit progress(m_index, int(m_events.size()));
-	next();
-}
-
-void KillVerifier::decide()
-{
-	KillEvent &e = m_events[m_index];
-	const Read &b = m_reads[0].ok ? m_reads[0] : m_reads[2];
-	const Read &a = m_reads[1].ok ? m_reads[1] : m_reads[3];
+	KillEvent &e = m_events[index];
+	const auto &rd = m_reads[index];
+	const Read &b = rd[0].ok ? rd[0] : rd[2];
+	const Read &a = rd[1].ok ? rd[1] : rd[3];
 	if (!b.ok || !a.ok) {
 		e.check = KillEvent::Unreadable;
 		return;
@@ -158,8 +131,8 @@ void KillVerifier::decide()
 	}
 	if (dk == 0 && da == 0) {
 		// 두 번씩 읽어 모두 같고 확실할 때만 "잘못 잡힌 킬"
-		const bool sure = m_reads[0].same(m_reads[2]) && m_reads[1].same(m_reads[3]) && !m_reads[0].weak &&
-				  !m_reads[1].weak && !m_reads[2].weak && !m_reads[3].weak;
+		const bool sure = rd[0].same(rd[2]) && rd[1].same(rd[3]) && !rd[0].weak && !rd[1].weak && !rd[2].weak &&
+				  !rd[3].weak;
 		e.check = sure ? KillEvent::Rejected : KillEvent::Unreadable;
 		return;
 	}

@@ -42,8 +42,8 @@ void AudioLevels::start(const QString &path, double duration)
 	m_db.clear();
 	m_duration = duration;
 	setQuietProcess(m_proc, true);
-	m_proc.start(ffmpegPath(), {"-hide_banner", "-nostdin", "-loglevel", "error", "-i", path, "-vn", "-sn", "-dn",
-				    "-ac", "1", "-ar", QString::number(kRate), "-f", "s16le", "-"});
+	m_proc.start(ffmpegPath(), QStringList{"-hide_banner", "-nostdin", "-loglevel", "error"} + inputArgs(path) +
+					   QStringList{"-vn", "-sn", "-dn", "-ac", "1", "-ar", QString::number(kRate), "-f", "s16le", "-"});
 }
 
 void AudioLevels::cancel()

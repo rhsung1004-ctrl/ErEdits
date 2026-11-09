@@ -25,6 +25,7 @@ class SubtitlePanel;
 class VideoView;
 class EditTimeline;
 class AiPanel;
+class JoinedPlayer;
 class Thumbs;
 class TimelineBar;
 
@@ -34,6 +35,7 @@ public:
 	explicit MainWindow(QWidget *parent = nullptr);
 	~MainWindow() override;
 	void openVideo(const QString &path);
+	void openFiles(QStringList files); // 하나면 그대로, 여러 개면 순서를 정해 묶어서
 
 protected:
 	void dragEnterEvent(QDragEnterEvent *e) override;
@@ -116,7 +118,7 @@ private:
 	Exporter *m_exporter;
 
 	// 화면
-	QMediaPlayer *m_player;
+	JoinedPlayer *m_player;
 	QAudioOutput *m_audio;
 	VideoView *m_view;
 	SubtitlePanel *m_subPanel;
@@ -145,6 +147,7 @@ private:
 	QDoubleSpinBox *m_xfade, *m_fadeIn, *m_fadeOut;
 	QComboBox *m_res, *m_fps;
 	QCheckBox *m_cpuOnly;
+	QCheckBox *m_loudnorm;
 	QPushButton *m_btnExport;
 	QProgressBar *m_exportProgress;
 	QLabel *m_exportStatus;

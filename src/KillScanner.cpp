@@ -75,7 +75,7 @@ void KillScanner::launch(bool hwaccel)
 		args << "-skip_frame" << "nokey";
 	if (hwaccel)
 		args << "-hwaccel" << "auto";
-	args << "-i" << m_path << "-an" << "-sn" << "-dn";
+	args << inputArgs(m_path) << "-an" << "-sn" << "-dn";
 	if (m_withKill && !m_withResults && !m_withChat) {
 		args << "-vf" << QString("fps=%1,").arg(kRate) + killChain << "-f" << "rawvideo" << "-pix_fmt" << "gray"
 		     << "-";
