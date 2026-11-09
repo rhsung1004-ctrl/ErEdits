@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
 # Qt 6 (화면 + 미리보기 재생). 영상 분석·내보내기는 함께 넣는 ffmpeg.exe 로 처리
-find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia Network)
 
 add_executable(ERKillCut WIN32
   src/main.cpp
@@ -30,9 +30,14 @@ add_executable(ERKillCut WIN32
   src/KillVerifier.h    src/KillVerifier.cpp
   src/EditTimeline.h    src/EditTimeline.cpp
   src/Thumbs.h          src/Thumbs.cpp
+  src/Highlights.h      src/Highlights.cpp
+  src/ChzzkChat.h       src/ChzzkChat.cpp
+  src/AudioLevels.h     src/AudioLevels.cpp
+  src/LocalAi.h         src/LocalAi.cpp
+  src/AiPanel.h         src/AiPanel.cpp
 )
 
-target_link_libraries(ERKillCut PRIVATE Qt6::Widgets Qt6::Multimedia)
+target_link_libraries(ERKillCut PRIVATE Qt6::Widgets Qt6::Multimedia Qt6::Network)
 
 if(MSVC)
   target_compile_options(ERKillCut PRIVATE /utf-8 /W3)
@@ -45,7 +50,8 @@ if(ERKILLCUT_TESTS)
   add_executable(erkillcut_cli tests/cli.cpp
     src/HudKillWatcher.cpp src/KillScanner.cpp src/Segments.cpp src/Exporter.cpp src/Util.cpp
     src/FontManager.cpp src/Subtitles.cpp src/ComboColors.h src/ComboColors.cpp
-    src/ResultScreen.cpp src/Games.cpp src/RankReader.cpp src/KillVerifier.cpp)
+    src/ResultScreen.cpp src/Games.cpp src/RankReader.cpp src/KillVerifier.cpp
+    src/Highlights.cpp src/ChzzkChat.cpp src/AudioLevels.cpp src/LocalAi.cpp)
   target_include_directories(erkillcut_cli PRIVATE src)
-  target_link_libraries(erkillcut_cli PRIVATE Qt6::Gui)
+  target_link_libraries(erkillcut_cli PRIVATE Qt6::Gui Qt6::Network)
 endif()

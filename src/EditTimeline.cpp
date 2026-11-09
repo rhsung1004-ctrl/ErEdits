@@ -12,6 +12,7 @@
 
 namespace {
 const QColor kClip[2] = {QColor("#D9822B"), QColor("#B8681E")};
+const QColor kFun[2] = {QColor("#2FA383"), QColor("#258A6E")}; // 재밌는 장면
 }
 
 EditTimeline::EditTimeline(QWidget *parent) : QWidget(parent)
@@ -284,7 +285,7 @@ void EditTimeline::paintEvent(QPaintEvent *)
 		r.adjust(1, 1, -1, -1);
 		if (r.width() < 1 || r.right() < 0 || r.left() > width())
 			continue;
-		const QColor c = kClip[n % 2];
+		const QColor c = s.kind == Segment::Fun ? kFun[n % 2] : kClip[n % 2];
 		p.setPen(Qt::NoPen);
 		p.setBrush(c);
 		p.drawRoundedRect(r, 4, 4);
@@ -321,6 +322,10 @@ void EditTimeline::paintEvent(QPaintEvent *)
 		// 이름표
 		QStringList what;
 		what << QString("#%1").arg(n + 1);
+		if (s.kind == Segment::Fun)
+			what << (s.note.isEmpty() ? QString("재밌는 장면") : "😂 " + s.note);
+		else if (s.score >= 0)
+			what << QString("★%1").arg(s.score);
 		if (s.kills > 0)
 			what << QString("킬 %1").arg(s.kills);
 		if (s.assists > 0)

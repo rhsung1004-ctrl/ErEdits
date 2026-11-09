@@ -24,6 +24,7 @@ class QTableWidget;
 class SubtitlePanel;
 class VideoView;
 class EditTimeline;
+class AiPanel;
 class Thumbs;
 class TimelineBar;
 
@@ -79,6 +80,7 @@ private:
 	void recountSegments(); // 클립마다 안에 든 킬·어시 수 다시 세기
 	void splitAtPlayhead();
 	void requestThumbs();
+	void setFunClips(const QVector<int> &indices, bool add);
 
 	// 분석 결과를 영상별로 저장 (몇 시간짜리를 다시 분석하지 않게)
 	QString cachePath() const;
@@ -109,6 +111,7 @@ private:
 	RankReader *m_rankReader;
 	KillVerifier *m_verifier;
 	Thumbs *m_thumbs;
+	AiPanel *m_aiPanel = nullptr;
 	QVector<QVector<Segment>> m_undo, m_redo;
 	Exporter *m_exporter;
 

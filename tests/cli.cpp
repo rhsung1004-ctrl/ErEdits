@@ -2,12 +2,19 @@
 //   erkillcut_cli scan <영상> [fast] [x y w h]
 //   erkillcut_cli rank <영상> [최대등수] [fast]       — 킬 + 결과 화면 찾기 → 킬 숫자 확인 → 등수 읽기 → 판별 결과
 //   erkillcut_cli readhud <그림> [그림 ...]            — 킬 숫자 줄(TK·K·A)만 잘라 낸 그림에서 숫자 읽기
+//   erkillcut_cli chzzkpage <응답.json>                — 치지직 다시보기 채팅 응답 한 장 읽기
+//   erkillcut_cli highlights <영상> <채팅.json> [AI]   — 킬·소리·채팅 → 잘한 장면 점수·재밌는 장면 후보 (AI: 로컬 AI 확인까지)
+//        채팅.json = [[초, "내용"], ...]  /  AI 설정은 ERKCLI_WHISPER, ERKCLI_WMODEL, ERKCLI_OLLAMA, ERKCLI_MODEL
 //   erkillcut_cli readframe <그림> [그림 ...]          — 결과 화면 캡처 한 장에서 등수 읽기
 //   erkillcut_cli export <영상> <결과.mp4> <시작-끝,시작-끝,...> [크로스페이드] [페이드인] [페이드아웃] ["시작-끝|글자;..." [글꼴파일]]
 #include "Exporter.h"
 #include "Games.h"
 #include "KillScanner.h"
 #include "KillVerifier.h"
+#include "AudioLevels.h"
+#include "ChzzkChat.h"
+#include "Highlights.h"
+#include "LocalAi.h"
 #include "RankReader.h"
 #include "Util.h"
 
@@ -15,6 +22,10 @@
 
 #include <QGuiApplication>
 #include <QImage>
+#include <memory>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QFile>
 #include <QTextStream>
 
 #include <cstring>
@@ -30,6 +41,33 @@ int main(int argc, char *argv[])
 		out << "usage: scan <video> [fast] [x y w h] | export <video> <out> <s-e,...> [xfade fin fout]\n";
 		return 2;
 	}
+	if (a[1] == "chzzkfetch" && a.size() >= 3) { // 영상 없이: 다시보기 주소/번호
+		auto *cz = new ChzzkChat(&app);
+		QObject::connect(cz, &ChzzkChat::info, [&out](const QString &t, double d) { out << "info " << t << " " << d << "\n"; });
+		QObject::connect(cz, &ChzzkChat::progress, [&out](double at, double d, int n) { out << "progress " << at << "/" << d << " n=" << n << "\n"; });
+		QObject::connect(cz, &ChzzkChat::finished, [&out, &app](bool ok, const QString &m, const QVector<ChatMessage> &c) {
+			out << "finished ok=" << ok << " " << m << " count=" << c.size() << "\n";
+			if (!c.isEmpty())
+				out << "first=" << c.front().time << " " << c.front().text << " last=" << c.back().time << " " << c.back().text << "\n";
+			out.flush();
+			app.exit(0);
+		});
+		cz->start(ChzzkChat::videoNumber(a[2]));
+		return app.exec();
+	}
+
+	if (a[1] == "chzzkpage" && a.size() >= 3) {
+		QFile f(a[2]);
+		f.open(QIODevice::ReadOnly);
+		qint64 next = 0;
+		QString err;
+		const auto msgs = ChzzkChat::parsePage(f.readAll(), &next, &err);
+		for (const ChatMessage &m : msgs)
+			out << "chat " << m.time << " " << m.text << "\n";
+		out << "next=" << next << " error=" << err << "\n";
+		return 0;
+	}
+
 	if (a[1] == "readhud") { // 킬 숫자 줄만 잘라 낸 그림
 		for (int i = 2; i < a.size(); ++i) {
 			const int W = HudKillWatcher::kW * rank::kHudScale, H = HudKillWatcher::kH * rank::kHudScale;
@@ -98,6 +136,86 @@ int main(int argc, char *argv[])
 			app.exit(ok ? 0 : 1);
 		});
 		sc.start(a[2], roi, info.duration, fast ? KillScanner::Fast : KillScanner::Precise);
+		return app.exec();
+	}
+
+	if (a[1] == "highlights" && a.size() >= 4) {
+		QFile cf(a[3]);
+		cf.open(QIODevice::ReadOnly);
+		const QVector<ChatMessage> chat = chatFromJson(QJsonDocument::fromJson(cf.readAll()).array());
+		const bool useAi = a.size() > 4 && a[4] == "AI";
+		const QRectF roi = defaultKillRoi(info.width, info.height);
+		auto *sc = new KillScanner(&app);
+		auto *kv = new KillVerifier(&app);
+		auto *al = new AudioLevels(&app);
+		auto *ai = new LocalAi(&app);
+		auto events = std::make_shared<QVector<KillEvent>>();
+		auto loud = std::make_shared<QVector<float>>();
+		auto cands = std::make_shared<QVector<FunCandidate>>();
+		SignalParams sp;
+		QObject::connect(sc, &KillScanner::found, [=](const KillEvent &e) { events->push_back(e); });
+		QObject::connect(sc, &KillScanner::finished, [=](bool, const QString &) { kv->start(a[2], roi, *events); });
+		QObject::connect(kv, &KillVerifier::finished, [=](const QVector<KillEvent> &ev) {
+			*events = ev;
+			al->start(a[2], info.duration);
+		});
+		QObject::connect(al, &AudioLevels::finished, [=, &out, &app](bool ok, const QVector<float> &db) {
+			*loud = db;
+			out << "audio ok=" << ok << " seconds=" << db.size() << "\n";
+			const Signals sig = computeSignals(chat, *loud, info.duration, sp);
+			QVector<Segment> segs = buildSegments(*events, SegmentParams{}, info.duration);
+			scoreSegments(&segs, *events, {}, sig);
+			for (const Segment &s : segs)
+				out << "clip " << formatTime(s.start) << " - " << formatTime(s.end) << " score=" << s.score << " [" << s.note
+				    << "]\n";
+			*cands = findFunCandidates(sig, chat, sp, segs, info.duration);
+			for (const FunCandidate &c : *cands)
+				out << "fun peak=" << formatTime(c.peak) << " " << formatTime(c.start) << "~" << formatTime(c.end)
+				    << " score=" << c.score << " [" << c.reason << "] sample=" << c.chatSample.mid(0, 3).join(" | ") << "\n";
+			QVector<Segment> withFun = segs;
+			for (int i : pickFunForBreaks(segs, *cands, 30)) {
+				Segment f;
+				f.kind = Segment::Fun;
+				f.start = (*cands)[i].clipStart();
+				f.end = (*cands)[i].clipEnd();
+				withFun.push_back(f);
+				out << "break-pick " << formatTime((*cands)[i].peak) << "\n";
+			}
+			fillToLength(&withFun, 60);
+			for (const Segment &s : withFun)
+				out << "fill60 " << formatTime(s.start) << " on=" << s.enabled << " kind=" << s.kind << " len=" << s.length()
+				    << "\n";
+			out.flush();
+			if (!useAi) {
+				app.exit(0);
+				return;
+			}
+			AiConfig cfg;
+			cfg.whisperExe = qEnvironmentVariable("ERKCLI_WHISPER");
+			cfg.whisperModel = qEnvironmentVariable("ERKCLI_WMODEL");
+			cfg.ollamaUrl = qEnvironmentVariable("ERKCLI_OLLAMA", "http://localhost:11434");
+			cfg.ollamaModel = qEnvironmentVariable("ERKCLI_MODEL", "qwen3:8b");
+			QVector<int> idx;
+			for (int i = 0; i < cands->size(); ++i)
+				idx.push_back(i);
+			ai->start(a[2], cfg, *cands, idx);
+		});
+		QObject::connect(ai, &LocalAi::status, [&out](const QString &s) {
+			out << "ai-status " << s << "\n";
+			out.flush();
+		});
+		QObject::connect(ai, &LocalAi::candidateDone, [&out](int i, const FunCandidate &c) {
+			out << "ai " << i << " state=" << c.ai << " score=" << c.aiScore << " title=" << c.title << " clip="
+			    << formatTime(c.clipStart()) << "~" << formatTime(c.clipEnd()) << "\n   transcript: "
+			    << QString(c.transcript).replace("\n", " / ") << "\n";
+			out.flush();
+		});
+		QObject::connect(ai, &LocalAi::finished, [&out, &app](bool ok, const QString &m) {
+			out << "ai finished ok=" << ok << " " << m << "\n";
+			out.flush();
+			app.exit(0);
+		});
+		sc->start(a[2], roi, info.duration, KillScanner::Precise);
 		return app.exec();
 	}
 
