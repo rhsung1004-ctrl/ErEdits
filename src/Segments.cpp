@@ -89,7 +89,7 @@ QJsonArray segmentsToJson(const QVector<Segment> &segs)
 	QJsonArray a;
 	for (const Segment &s : segs)
 		a.append(QJsonObject{{"s", s.start}, {"e", s.end}, {"k", s.kills}, {"a", s.assists}, {"on", s.enabled},
-				     {"m", s.manual}});
+				     {"m", s.manual}, {"kind", s.kind}, {"sc", s.score}, {"note", s.note}});
 	return a;
 }
 
@@ -105,6 +105,9 @@ QVector<Segment> segmentsFromJson(const QJsonArray &a)
 		s.assists = o["a"].toInt();
 		s.enabled = o["on"].toBool(true);
 		s.manual = o["m"].toBool();
+		s.kind = o["kind"].toInt(Segment::Kill);
+		s.score = o["sc"].toInt(-1);
+		s.note = o["note"].toString();
 		if (s.end > s.start)
 			out.push_back(s);
 	}

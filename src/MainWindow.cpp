@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "AiPanel.h"
 #include "EditTimeline.h"
 #include "RoiDialog.h"
 #include "Thumbs.h"
@@ -432,6 +433,39 @@ void MainWindow::buildUi()
 	auto *tabs = new QTabWidget;
 	tabs->addTab(g2, "2. 클립 (킬 장면만 남기기)");
 	tabs->addTab(buildRankTab(), "판 등수");
+	m_aiPanel = new AiPanel;
+	m_aiPanel->setSegmentsProvider([this] { return m_segs; });
+	m_aiPanel->setTimeProvider([this] { return m_player->position() / 1000.0; });
+	tabs->addTab(m_aiPanel, "AI 편집점");
+	connect(m_aiPanel, &AiPanel::signalsChanged, this, [this] {
+		scoreSegments(&m_segs, m_events, m_games, m_aiPanel->sig());
+		refreshTable();
+		saveCache();
+	});
+	connect(m_aiPanel, &AiPanel::funClipsRequested, this, &MainWindow::setFunClips);
+	connect(m_aiPanel, &AiPanel::fillRequested, this, [this](double target) {
+		if (m_segs.isEmpty())
+			return;
+		pushUndo();
+		fillToLength(&m_segs, target);
+		m_edited = true;
+		refreshTable();
+		saveCache();
+	});
+	connect(m_aiPanel, &AiPanel::breaksRequested, this, [this](double every) {
+		const QVector<int> pick = pickFunForBreaks(m_segs, m_aiPanel->candidates(), every);
+		if (pick.isEmpty()) {
+			m_summary->setText("<span style='color:#e9a'>넣을 만한 재밌는 장면 후보가 없어요 (이미 넣었거나 클립과 겹침)</span>");
+			return;
+		}
+		setFunClips(pick, true);
+	});
+	connect(m_aiPanel, &AiPanel::playRequested, this, [this](double a, double b) {
+		m_resultOnly->setChecked(false);
+		m_player->setPosition(qint64(a * 1000));
+		m_playEnd = b;
+		m_player->play();
+	});
 	tabs->addTab(m_subPanel, "자막");
 	rl->addWidget(tabs, 1);
 	rl->addWidget(g3);
@@ -689,6 +723,7 @@ void MainWindow::openVideo(const QString &path)
 
 	const bool cached = loadCache();
 	rebuildGames(false); // 저장된 클립은 그대로 (판 목록만 다시 계산)
+	m_aiPanel->setVideo(path, info.duration, info.hasAudio, cachePath().replace(".json", ".ai.json"));
 	if (cached) {
 		m_scanStatus->setText(QString("이전 분석 결과를 불러왔어요 (킬 %1번%2). 다시 분석하려면 [킬 찾기 시작].")
 					      .arg(std::count_if(m_events.begin(), m_events.end(),
@@ -800,12 +835,15 @@ void MainWindow::startScan()
 	m_rankStatus->setText("킬을 찾으면서 결과 화면도 함께 찾는 중…");
 	setBusy(true, false);
 	m_scanner->setResultDetection(gameRect());
+	m_scanner->setChatDetection(m_aiPanel->screenChatRect());
 	m_scanner->start(m_path, m_roi, m_info.duration, KillScanner::Mode(m_scanMode->currentData().toInt()));
 }
 
 void MainWindow::onScanFinished(bool ok, const QString &msg)
 {
 	setBusy(false, false);
+	if (m_scanner->chatMeasured() && !m_scanner->chatLines().isEmpty())
+		m_aiPanel->setScreenChat(m_scanner->chatLines());
 	const int kills = int(std::count_if(m_events.begin(), m_events.end(), [](const KillEvent &e) { return e.kill; }));
 	const int assists =
 		int(std::count_if(m_events.begin(), m_events.end(), [](const KillEvent &e) { return !e.kill && e.assist; }));
@@ -866,7 +904,23 @@ void MainWindow::rebuildSegments(bool force)
 				   "않았어요 → [다시 만들기]</span>");
 		return;
 	}
+	QVector<Segment> fun;
+	for (const Segment &sg : m_segs)
+		if (sg.kind == Segment::Fun)
+			fun.push_back(sg);
 	m_segs = buildSegments(filterEvents(m_events, m_games, gameFilter()), params(), m_info.duration);
+	// 넣어 둔 재밌는 장면은 유지 (킬 클립과 겹치면 뺌)
+	for (const Segment &f : fun) {
+		bool overlap = false;
+		for (const Segment &k : m_segs)
+			overlap = overlap || (k.start < f.end && f.start < k.end);
+		if (!overlap)
+			m_segs.insert(std::lower_bound(m_segs.begin(), m_segs.end(), f,
+						       [](const Segment &a, const Segment &b) { return a.start < b.start; }),
+				      f);
+	}
+	if (m_aiPanel && m_aiPanel->hasSignals())
+		scoreSegments(&m_segs, m_events, m_games, m_aiPanel->sig());
 	m_edited = false;
 	refreshTable();
 	saveCache();
@@ -887,13 +941,24 @@ void MainWindow::refreshTable()
 		m_table->setItem(i, 2, new QTableWidgetItem(formatTime(s.end)));
 		m_table->setItem(i, 3, new QTableWidgetItem(QString::number(s.length(), 'f', 1) + "s"));
 		QStringList what;
-		if (s.kills > 0)
-			what << QString("킬 %1").arg(s.kills);
-		if (s.assists > 0)
-			what << QString("어시 %1").arg(s.assists);
+		if (s.kind == Segment::Fun) {
+			what << "😂 재밌는 장면" + (s.note.isEmpty() ? QString() : ": " + s.note);
+		} else {
+			if (s.score >= 0)
+				what << QString("★%1").arg(s.score);
+			if (s.kills > 0)
+				what << QString("킬 %1").arg(s.kills);
+			if (s.assists > 0)
+				what << QString("어시 %1").arg(s.assists);
+		}
 		if (s.manual)
 			what << "직접 추가";
-		m_table->setItem(i, 4, new QTableWidgetItem(what.join(" · ")));
+		auto *wi = new QTableWidgetItem(what.join(" · "));
+		if (s.kind == Segment::Fun)
+			wi->setForeground(QColor(80, 200, 160));
+		if (!s.note.isEmpty())
+			wi->setToolTip(s.note);
+		m_table->setItem(i, 4, wi);
 	}
 	m_fillingTable = false;
 	if (keep >= 0 && keep < m_segs.size())
@@ -903,6 +968,8 @@ void MainWindow::refreshTable()
 	requestThumbs();
 	m_btnUndo->setEnabled(!m_undo.isEmpty());
 	m_btnRedo->setEnabled(!m_redo.isEmpty());
+	if (m_aiPanel)
+		m_aiPanel->syncAdded(m_segs);
 	m_subPanel->refreshMarks();
 	refreshSummary();
 }
@@ -1485,4 +1552,57 @@ void MainWindow::requestThumbs()
 	for (const Segment &s : m_segs)
 		if (s.enabled)
 			m_thumbs->request(std::max(0.0, s.start - 8), std::min(m_info.duration, s.end + 8));
+}
+
+// ───────────────────────── AI 편집점 ─────────────────────────
+
+void MainWindow::setFunClips(const QVector<int> &indices, bool add)
+{
+	const QVector<FunCandidate> &cands = m_aiPanel->candidates();
+	pushUndo();
+	int added = 0;
+	for (int idx : indices) {
+		if (idx < 0 || idx >= cands.size())
+			continue;
+		const FunCandidate &c = cands[idx];
+		if (!add) {
+			m_segs.erase(std::remove_if(m_segs.begin(), m_segs.end(),
+						    [&](const Segment &s) {
+							    return s.kind == Segment::Fun && s.start <= c.peak + 2 && s.end >= c.peak - 2;
+						    }),
+				     m_segs.end());
+			continue;
+		}
+		Segment f;
+		f.kind = Segment::Fun;
+		f.manual = false;
+		f.start = c.clipStart();
+		f.end = std::min(m_info.duration, c.clipEnd());
+		f.note = c.title.isEmpty() ? c.reason : c.title;
+		f.score = c.rankScore();
+		// 다른 클립과 겹치는 부분은 잘라 냄
+		for (const Segment &s : m_segs) {
+			if (s.end > f.start && s.start <= f.start)
+				f.start = s.end;
+			if (s.start < f.end && s.end >= f.end)
+				f.end = s.start;
+		}
+		bool inside = false;
+		for (const Segment &s : m_segs)
+			inside = inside || (s.start >= f.start && s.end <= f.end);
+		if (inside || f.length() < 4)
+			continue;
+		m_segs.insert(std::lower_bound(m_segs.begin(), m_segs.end(), f,
+					       [](const Segment &a, const Segment &b) { return a.start < b.start; }),
+			      f);
+		++added;
+	}
+	recountSegments();
+	m_edited = true;
+	refreshTable();
+	saveCache();
+	if (add && added < indices.size())
+		m_summary->setText(QString("<span style='color:#e9a'>재밌는 장면 %1개 중 %2개는 다른 클립과 겹쳐서 넣지 못했어요</span>")
+					   .arg(indices.size())
+					   .arg(indices.size() - added));
 }

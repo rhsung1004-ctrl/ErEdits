@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QJsonArray>
+#include <QString>
 #include <QVector>
 
 struct KillEvent {
@@ -21,12 +22,16 @@ struct KillEvent {
 
 // 결과 영상에 들어갈 한 구간 (원본 영상 기준 시간)
 struct Segment {
+	enum Kind { Kill = 0, Fun = 1 };
 	double start = 0;
 	double end = 0;
 	int kills = 0;
 	int assists = 0;
 	bool enabled = true;
 	bool manual = false; // 직접 추가한 구간
+	int kind = Kill;     // Fun = 분위기 환기용 재밌는 장면 (AI 편집점에서 넣음)
+	int score = -1;      // 잘한 장면 점수 0~100 (-1 = 아직 없음)
+	QString note;        // 점수 이유 / 재밌는 장면 한 줄 설명
 	double length() const { return end - start; }
 };
 

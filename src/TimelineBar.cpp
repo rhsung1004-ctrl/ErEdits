@@ -79,9 +79,10 @@ void TimelineBar::paintEvent(QPaintEvent *)
 	for (int i = 0; i < m_segs.size(); ++i) {
 		const Segment &s = m_segs[i];
 		const double x0 = toX(s.start), x1 = std::max(toX(s.end), x0 + 2);
-		QColor c = s.enabled ? QColor(245, 160, 40) : QColor(110, 110, 110);
+		const bool fun = s.kind == Segment::Fun;
+		QColor c = !s.enabled ? QColor(110, 110, 110) : fun ? QColor(60, 190, 150) : QColor(245, 160, 40);
 		if (i == m_selected)
-			c = QColor(255, 220, 90);
+			c = fun ? QColor(130, 235, 200) : QColor(255, 220, 90);
 		p.fillRect(QRectF(x0, bar.top() + 3, x1 - x0, bar.height() - 7), c);
 	}
 	// 자막 (막대 아래쪽 보라색)
