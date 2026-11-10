@@ -25,7 +25,8 @@ struct ExportSettings {
 
 // 고른 구간들을 원본에서 잘라 16:9 한 편으로 합침 (ffmpeg 한 번)
 //  - 구간마다 -ss 로 바로 찾아가서 읽으므로 몇 시간짜리 원본도 앞부분을 다 풀지 않음
-//  - 클립 사이: xfade(영상) + acrossfade(소리), 처음/끝: fade + afade
+//  - 클립 사이: 겹치는 짧은 두 조각만 xfade(영상) + acrossfade(소리)로 섞고 모든 조각을 차례로 이어 붙임
+//  - 처음/끝: fade + afade
 class Exporter : public QObject {
 	Q_OBJECT
 public:
@@ -38,7 +39,15 @@ public:
 	bool isRunning() const { return m_proc.state() != QProcess::NotRunning; }
 
 	// 실제로 쓰일 크로스페이드 길이 (가장 짧은 클립의 절반을 넘지 않게)
-	static double preRoll(const Segment &seg, double maxPre);
+	// 원본에서 읽을 조각: 클립 몸통, 크로스페이드로 겹치는 앞 클립 끝(Tail)·다음 클립 처음(Head)
+	struct Input {
+		enum Kind { Body, Tail, Head };
+		double start = 0;  // 원본 시각
+		qint64 frames = 0; // 길이 (프레임)
+		Kind kind = Body;
+	};
+	static QVector<Input> inputs(const QVector<Segment> &segments, double crossfade, double fps);
+	static double frameCrossfade(const QVector<Segment> &segments, double wanted, double fps);
 	static double effectiveCrossfade(const QVector<Segment> &segments, double wanted);
 	// 결과 영상 길이
 	static double outputLength(const QVector<Segment> &segments, double crossfade);

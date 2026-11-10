@@ -135,11 +135,17 @@ static VideoInfo probeOne(const QString &path)
 			info.fps = f;
 		else if (r > 0)
 			info.fps = r;
-		for (double std : {23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0, 120.0})
-			if (info.fps > 0 && std::abs(info.fps - std) / std < 0.015 && std::abs(info.fps - std) > 1e-3) {
-				info.fps = std;
-				break;
+		// 가장 가까운 표준 속도로 (1.5% 안일 때만)
+		double best = 0, bestErr = 0.015;
+		for (double std : {23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0, 120.0}) {
+			const double err = std::abs(info.fps - std) / std;
+			if (err < bestErr) {
+				best = std;
+				bestErr = err;
 			}
+		}
+		if (best > 0)
+			info.fps = best;
 	}
 	info.hasAudio = text.contains(QRegularExpression(R"(Stream #[^\n]*Audio:)"));
 	info.ok = info.width > 0 && info.height > 0 && info.duration > 0;

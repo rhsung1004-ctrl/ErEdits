@@ -59,10 +59,10 @@ Exporter::~Exporter()
 	}
 }
 
-// 클립 앞에서 미리 읽는 시간 (키프레임까지 거슬러 올라가 첫 장면부터 제대로 나오게)
-double Exporter::preRoll(const Segment &seg, double maxPre)
+double Exporter::frameCrossfade(const QVector<Segment> &segments, double wanted, double fps)
 {
-	return std::clamp(seg.start, 0.0, maxPre);
+	const double d = effectiveCrossfade(segments, wanted);
+	return d > 0 ? std::llround(d * fps) / fps : 0.0;
 }
 
 double Exporter::effectiveCrossfade(const QVector<Segment> &segments, double wanted)
@@ -83,30 +83,53 @@ double Exporter::outputLength(const QVector<Segment> &segments, double crossfade
 	return std::max(0.0, sum - std::max(0, int(segments.size()) - 1) * crossfade);
 }
 
+QVector<Exporter::Input> Exporter::inputs(const QVector<Segment> &segs, double d, double fps)
+{
+	// 크로스페이드가 있으면 클립을 [앞 겹침][몸통][뒤 겹침]으로 나눠, 겹치는 짧은 두 조각만 따로 섞음
+	//  → 모든 조각을 차례로 이어 붙이기만 하면 됨 (xfade 를 클립 수만큼 이으면 ffmpeg 가 모든 클립을 미리 풀어 둬서
+	//    클립이 많을 때 메모리가 수 GB 까지 늘어남)
+	const int n = int(segs.size());
+	const qint64 D = d > 0 ? std::llround(d * fps) : 0;
+	QVector<qint64> N;
+	for (const Segment &sg : segs)
+		N.push_back(std::max<qint64>(1, std::llround(sg.length() * fps)));
+	QVector<Input> in;
+	for (int k = 0; k < n; ++k) {
+		if (k > 0 && D > 0) {
+			in.push_back({segs[k - 1].start + (N[k - 1] - D) / fps, D, Input::Tail});
+			in.push_back({segs[k].start, D, Input::Head});
+		}
+		const qint64 a = (k > 0 ? D : 0), b = (k < n - 1 ? D : 0);
+		in.push_back({segs[k].start + a / fps, std::max<qint64>(1, N[k] - a - b), Input::Body});
+	}
+	return in;
+}
+
 QString Exporter::buildFilter(const QVector<Segment> &segs, const QVector<Overlay> &overlays, const VideoInfo &info,
 			      const ExportSettings &s, int W, int H, double fps, double *totalOut)
 {
-	const int n = int(segs.size());
-	const double d = effectiveCrossfade(segs, s.crossfade);
+	const double d = frameCrossfade(segs, s.crossfade, fps);
 	const QString rate = QString::number(fps, 'g', 6);
+	const QVector<Input> in = inputs(segs, d, fps);
 	QStringList parts;
 
-	for (int i = 0; i < n; ++i) {
-		const QString L = fmt(segs[i].length());
-		const QString P = fmt(preRoll(segs[i], s.preRoll));
+	for (int i = 0; i < in.size(); ++i) {
+		const QString L = QString::number(in[i].frames / fps, 'f', 6);
+		const QString P = fmt(std::clamp(in[i].start, 0.0, s.preRoll));
 		// 조금 앞부터 읽은 뒤 시각 그대로 잘라 냄 (첫 장면 시각으로 0을 맞추면 .ts 처럼 찾아가기가 부정확한 영상에서
 		// 앞쪽 장면이 빠진 만큼 그림이 소리보다 빨라짐). 그림·소리 모두 같은 시각 기준
-		// 길이를 프레임 단위로 정확히 맞추고(모자라면 마지막 장면 유지), 16:9 캔버스 가운데에 맞춤
+		// 그림은 프레임 수로, 소리는 같은 길이로 잘라 조각마다 어긋남이 쌓이지 않게. 16:9 캔버스 가운데에 맞춤
 		parts << QString("[%1:v]trim=start=" + P + ",setpts=PTS-" + P + "/TB,fps=%2:start_time=0,"
-				 "tpad=stop_mode=clone:stop_duration=2,trim=duration=%3,"
-				 "setpts=PTS-STARTPTS,scale=%4:%5:force_original_aspect_ratio=decrease:flags=bicubic,"
-				 "pad=%4:%5:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v%1]")
+				 "tpad=stop_mode=clone:stop_duration=2,trim=end_frame=" + QString::number(in[i].frames) + ","
+				 "scale=%3:%4:force_original_aspect_ratio=decrease:flags=bicubic,"
+				 "pad=%3:%4:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v%1]")
 				 .arg(i)
-				 .arg(rate, L)
+				 .arg(rate)
 				 .arg(W)
 				 .arg(H);
 		if (info.hasAudio)
-			parts << QString("[%1:a]atrim=start=" + P + ",asetpts=PTS-" + P + "/TB,aresample=48000:async=1:first_pts=0,"
+			parts << QString("[%1:a]atrim=start=" + P + ",asetpts=PTS-" + P + "/TB,"
+					 "aresample=48000:async=1:min_hard_comp=0.02:first_pts=0,"
 					 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
 					 "apad=whole_dur=%2,atrim=duration=%2,asetpts=PTS-STARTPTS[a%1]")
 					 .arg(i)
@@ -115,26 +138,24 @@ QString Exporter::buildFilter(const QVector<Segment> &segs, const QVector<Overla
 			parts << QString("anullsrc=r=48000:cl=stereo,atrim=duration=%2,asetpts=PTS-STARTPTS[a%1]").arg(i).arg(L);
 	}
 
-	QString vLast = "v0", aLast = "a0";
-	if (n > 1 && d > 0) {
-		double cum = segs[0].length();
-		for (int k = 1; k < n; ++k) {
-			const double offset = cum - k * d; // 앞까지 이어진 영상이 끝나기 d초 전
-			const QString vo = QString("vx%1").arg(k), ao = QString("ax%1").arg(k);
-			parts << QString("[%1][v%2]xfade=transition=fade:duration=%3:offset=%4[%5]")
-					 .arg(vLast)
-					 .arg(k)
-					 .arg(fmt(d), fmt(offset), vo);
-			parts << QString("[%1][a%2]acrossfade=d=%3:c1=tri:c2=tri[%4]").arg(aLast).arg(k).arg(fmt(d), ao);
-			vLast = vo;
-			aLast = ao;
-			cum += segs[k].length();
+	// 조각 순서대로: 몸통 그대로, 겹침 두 조각은 섞어서 하나로
+	QString seq;
+	int pieces = 0;
+	for (int i = 0; i < in.size(); ++i) {
+		if (in[i].kind == Input::Tail) {
+			const QString dd = QString::number(in[i].frames / fps, 'f', 6);
+			parts << QString("[v%1][v%2]xfade=transition=fade:duration=%3:offset=0[vt%1]").arg(i).arg(i + 1).arg(dd);
+			parts << QString("[a%1][a%2]acrossfade=d=%3:c1=tri:c2=tri[at%1]").arg(i).arg(i + 1).arg(dd);
+			seq += QString("[vt%1][at%1]").arg(i);
+			++i; // 다음은 Head (함께 섞음)
+		} else {
+			seq += QString("[v%1][a%1]").arg(i);
 		}
-	} else if (n > 1) {
-		QString in;
-		for (int i = 0; i < n; ++i)
-			in += QString("[v%1][a%1]").arg(i);
-		parts << in + QString("concat=n=%1:v=1:a=1[vcat][acat]").arg(n);
+		++pieces;
+	}
+	QString vLast = "v0", aLast = "a0";
+	if (pieces > 1) {
+		parts << seq + QString("concat=n=%1:v=1:a=1[vcat][acat]").arg(pieces);
 		vLast = "vcat";
 		aLast = "acat";
 	}
@@ -276,11 +297,15 @@ void Exporter::run(const QString &encoder)
 
 	// 자막: 결과 크기로 그린 PNG 를 임시 폴더에 두고 조각마다 입력으로 넣음
 	m_tmp = std::make_unique<QTemporaryDir>(QDir::tempPath() + "/erkillcut_XXXXXX");
-	const double d = effectiveCrossfade(m_segs, m_set.crossfade);
+	// 클립 길이를 프레임 단위로 맞춤 (그림은 프레임 단위로만 자를 수 있어서, 소리도 같은 길이로)
+	for (Segment &seg : m_segs)
+		seg.end = seg.start + std::max<qint64>(1, std::llround(seg.length() * fps)) / fps;
+	const double d = frameCrossfade(m_segs, m_set.crossfade, fps);
 	const double total = outputLength(m_segs, d);
 	QVector<Overlay> overlays;
 	QStringList overlayArgs;
-	const int firstInput = int(m_segs.size());
+	const QVector<Input> pieces = inputs(m_segs, d, fps);
+	const int firstInput = int(pieces.size());
 	for (int i = 0; i < m_subs.size() && m_tmp->isValid(); ++i) {
 		const Subtitle &sb = m_subs[i];
 		const QVector<SubtitlePiece> pieces = mapSubtitle(sb, m_segs, d);
@@ -322,10 +347,12 @@ void Exporter::run(const QString &encoder)
 	m_script->close();
 
 	QStringList args{"-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats"};
-	for (const Segment &seg : m_segs) {
-		// 앞뒤로 조금 넉넉히 읽고 필터에서 정확히 자름
-		const double pre = preRoll(seg, m_set.preRoll);
-		args << "-ss" << fmt(seg.start - pre) << "-t" << fmt(seg.length() + pre + 1.0) << inputArgs(m_input);
+	for (const Input &pc : pieces) {
+		// 앞뒤로 조금 넉넉히 읽고 필터에서 정확히 자름 (buildFilter 와 같은 앞 여유)
+		const double pre = std::clamp(pc.start, 0.0, m_set.preRoll);
+		// 조각마다 풀기 스레드를 줄여 둠 (CPU 코어가 많으면 조각 수 × 코어 수만큼 장면을 쌓아 두어 메모리가 커짐)
+		args << "-threads" << "4" << "-ss" << fmt(pc.start - pre) << "-t" << fmt(pc.frames / fps + pre + 1.0)
+		     << inputArgs(m_input);
 	}
 	args << overlayArgs;
 	if (ffmpegHasNewScriptOption())
