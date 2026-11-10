@@ -169,6 +169,9 @@ QString Exporter::buildFilter(const QVector<Segment> &segs, const QVector<Overla
 		vLast = out;
 	}
 	parts << QString("[%1]%2,format=yuv420p[vout]").arg(vLast, vf);
+	// 소리 크기 맞추기: 전체를 -14 LUFS 로 (loudnorm 은 내부에서 192kHz 로 바꾸므로 다시 48kHz)
+	if (s.normalizeAudio)
+		af += ",loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000";
 	parts << QString("[%1]%2[aout]").arg(aLast, af);
 	return parts.join(";\n");
 }
@@ -310,7 +313,7 @@ void Exporter::run(const QString &encoder)
 	QStringList args{"-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats"};
 	for (const Segment &seg : m_segs) {
 		// 앞뒤로 조금 넉넉히 읽고 필터에서 정확히 자름
-		args << "-ss" << fmt(seg.start) << "-t" << fmt(seg.length() + 1.0) << "-i" << m_input;
+		args << "-ss" << fmt(seg.start) << "-t" << fmt(seg.length() + 1.0) << inputArgs(m_input);
 	}
 	args << overlayArgs;
 	if (ffmpegHasNewScriptOption())

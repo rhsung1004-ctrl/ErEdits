@@ -15,6 +15,11 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# main 에 연달아 올리면 빌드가 동시에 끝나 옛 빌드가 "최신"으로 게시되는 일이 있어서 차례대로
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   QT_VERSION: '6.8.3'
 

@@ -1,23 +1,48 @@
 #include "RankReader.h"
 
+#include "FrameGrabber.h"
+#include "ResultScreen.h"
 #include "Util.h"
 
 #include <algorithm>
 
-RankReader::RankReader(QObject *parent) : QObject(parent)
+RankReader::RankReader(QObject *parent) : QObject(parent), m_grab(new FrameGrabber(this))
 {
-	connect(&m_proc, &QProcess::readyReadStandardOutput, this, [this] { m_buf += m_proc.readAllStandardOutput(); });
-	connect(&m_proc, &QProcess::finished, this, &RankReader::onFinished);
+	connect(m_grab, &FrameGrabber::frame, this, [this](int k, const QByteArray &rgb) {
+		if (!m_running || k < 0 || k >= m_asked.size())
+			return;
+		const auto [ci, t] = m_asked[k];
+		if (m_found[ci].isEmpty() && rgb.size() >= qsizetype(rank::kFullW) * rank::kFullH * 3) {
+			const rank::Reading r = rank::readRank(reinterpret_cast<const uint8_t *>(rgb.constData()));
+			if (r.ok()) {
+				RankReading rr;
+				rr.time = t;
+				rr.screen = r.screen;
+				rr.rank = r.rank;
+				rr.weak = r.weak;
+				m_found[ci].push_back(rr);
+			}
+		}
+		if (m_round == 1)
+			emit progress(++m_done, int(m_cands.size()));
+	});
+	connect(m_grab, &FrameGrabber::finished, this, [this] {
+		if (!m_running)
+			return;
+		if (m_round == 1) {
+			runRound(2);
+			return;
+		}
+		m_running = false;
+		QVector<RankReading> out;
+		for (const auto &f : m_found)
+			out += f;
+		emit progress(int(m_cands.size()), int(m_cands.size()));
+		emit finished(true, out);
+	});
 }
 
-RankReader::~RankReader()
-{
-	m_cancelled = true;
-	if (m_proc.state() != QProcess::NotRunning) {
-		m_proc.kill();
-		m_proc.waitForFinished(3000);
-	}
-}
+RankReader::~RankReader() = default;
 
 void RankReader::start(const QString &path, const QRectF &game, const QVector<ResultCandidate> &cands)
 {
@@ -25,84 +50,42 @@ void RankReader::start(const QString &path, const QRectF &game, const QVector<Re
 	m_path = path;
 	m_game = game;
 	m_cands = cands;
-	m_out.clear();
-	m_index = 0;
-	m_try = 0;
-	m_cancelled = false;
+	m_found = QVector<QVector<RankReading>>(cands.size());
+	m_done = 0;
 	m_running = true;
-	next();
+	runRound(1);
 }
 
 void RankReader::cancel()
 {
 	if (!m_running)
 		return;
-	m_cancelled = true;
-	if (m_proc.state() != QProcess::NotRunning) {
-		m_proc.kill();
-		m_proc.waitForFinished(3000);
-	}
 	m_running = false;
+	m_grab->cancel();
 }
 
-void RankReader::next()
+void RankReader::runRound(int round)
 {
-	if (m_cancelled)
-		return;
-	if (m_index >= m_cands.size()) {
-		m_running = false;
-		emit progress(int(m_cands.size()), int(m_cands.size()));
-		emit finished(true, m_out);
-		return;
+	m_round = round;
+	m_asked.clear();
+	QVector<double> times;
+	for (int i = 0; i < m_cands.size(); ++i) {
+		const ResultCandidate &c = m_cands[i];
+		if (round == 1) {
+			m_asked.push_back({i, c.mid()});
+		} else {
+			// 가운데에서 못 읽었고 장면이 둘 이상이면 처음·마지막 장면 (먼저 읽힌 것 하나만 씀)
+			if (!m_found[i].isEmpty() || c.t1 - c.t0 < 0.15)
+				continue;
+			m_asked.push_back({i, c.t0 + 0.05});
+			m_asked.push_back({i, c.t1 - 0.05});
+		}
 	}
-	const ResultCandidate &c = m_cands[m_index];
-	// 가운데 → (못 읽으면) 처음 보인 장면 → 마지막으로 보인 장면
-	if (m_try == 0)
-		m_time = c.mid();
-	else if (m_try == 1)
-		m_time = c.t0 + 0.05;
-	else
-		m_time = c.t1 - 0.05;
-	m_time = std::max(0.0, m_time);
-
+	for (const auto &a : m_asked)
+		times.push_back(std::max(0.0, a.second));
 	const QString vf = QString("crop=w='iw*%1':h='ih*%2':x='iw*%3':y='ih*%4',scale=%5:%6:flags=bicubic")
 				   .arg(num(m_game.width()), num(m_game.height()), num(m_game.x()), num(m_game.y()))
 				   .arg(rank::kFullW)
 				   .arg(rank::kFullH);
-	m_buf.clear();
-	setQuietProcess(m_proc, false);
-	m_proc.start(ffmpegPath(), {"-hide_banner", "-nostdin", "-loglevel", "error", "-ss", num(m_time), "-i", m_path,
-				    "-frames:v", "1", "-an", "-sn", "-dn", "-vf", vf, "-f", "rawvideo", "-pix_fmt",
-				    "rgb24", "-"});
-}
-
-void RankReader::onFinished(int, QProcess::ExitStatus)
-{
-	if (m_cancelled)
-		return;
-	m_buf += m_proc.readAllStandardOutput();
-	const qsizetype need = qsizetype(rank::kFullW) * rank::kFullH * 3;
-	rank::Reading r;
-	if (m_buf.size() >= need)
-		r = rank::readRank(reinterpret_cast<const uint8_t *>(m_buf.constData()));
-	m_buf.clear();
-
-	const ResultCandidate &c = m_cands[m_index];
-	const bool shortRun = c.t1 - c.t0 < 0.15; // 한 장면뿐이면 앞·뒤도 같은 장면
-	if (r.ok() || m_try >= 2 || shortRun) {
-		if (r.ok()) {
-			RankReading rr;
-			rr.time = m_time;
-			rr.screen = r.screen;
-			rr.rank = r.rank;
-			rr.weak = r.weak;
-			m_out.push_back(rr);
-		}
-		++m_index;
-		m_try = 0;
-		emit progress(m_index, int(m_cands.size()));
-	} else {
-		++m_try;
-	}
-	next();
+	m_grab->start(m_path, times, vf, rank::kFullW, rank::kFullH);
 }

@@ -14,6 +14,12 @@ public:
 	void setDuration(double d);
 	void setPosition(double t);
 	void setScanned(double t);
+	// 여러 파일을 묶었을 때 파일이 바뀌는 시각들 (흰 세로줄)
+	void setBoundaries(const QVector<double> &t)
+	{
+		m_bounds = t;
+		update();
+	}
 	void setData(const QVector<Segment> &segs, const QVector<KillEvent> &events, bool includeAssist);
 	void setSelected(int index);
 	void setSubtitles(const QVector<Subtitle> &subs);
@@ -35,6 +41,7 @@ private:
 	double m_duration = 0;
 	double m_pos = 0;
 	double m_scanned = 0;
+	QVector<double> m_bounds;
 	int m_selected = -1;
 	bool m_assist = false;
 	QVector<Segment> m_segs;

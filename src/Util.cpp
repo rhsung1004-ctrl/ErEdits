@@ -3,6 +3,12 @@
 #include "HudKillWatcher.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFile>
+#include <QSaveFile>
+#include <QStandardPaths>
+#include <QTextStream>
 #include <QFileInfo>
 #include <QProcess>
 #include <QRegularExpression>
@@ -52,7 +58,40 @@ QString formatTime(double sec, bool tenths)
 	return out;
 }
 
+static VideoInfo probeOne(const QString &path);
+
 VideoInfo probeVideo(const QString &path)
+{
+	if (!isJoined(path))
+		return probeOne(path);
+	// 묶음: 파일마다 확인해 길이를 더함 (크기·프레임은 첫 파일)
+	const auto parts = readJoined(path);
+	VideoInfo info;
+	if (parts.isEmpty()) {
+		info.error = "묶은 파일 목록을 읽지 못했어요";
+		return info;
+	}
+	info.hasAudio = true;
+	for (int i = 0; i < parts.size(); ++i) {
+		const VideoInfo one = probeOne(parts[i].file);
+		if (!one.ok) {
+			info.ok = false;
+			info.error = QString("묶은 파일을 열 수 없어요: %1\n%2").arg(QFileInfo(parts[i].file).fileName(), one.error);
+			return info;
+		}
+		if (i == 0) {
+			info.width = one.width;
+			info.height = one.height;
+			info.fps = one.fps;
+		}
+		info.hasAudio = info.hasAudio && one.hasAudio;
+	}
+	info.duration = parts.back().offset + parts.back().duration;
+	info.ok = info.duration > 0 && info.width > 0;
+	return info;
+}
+
+static VideoInfo probeOne(const QString &path)
 {
 	VideoInfo info;
 	QProcess p;
@@ -132,4 +171,117 @@ QRectF gameRectFromKillRoi(const QRectF &roi, int videoW, int videoH)
 QString num(double v)
 {
 	return QString::number(v, 'f', 6);
+}
+
+// ───────────────────────── 여러 파일 묶기 ─────────────────────────
+
+bool isJoined(const QString &path)
+{
+	return path.endsWith(".ffconcat", Qt::CaseInsensitive);
+}
+
+QVector<JoinedPart> readJoined(const QString &path)
+{
+	QVector<JoinedPart> out;
+	QFile f(path);
+	if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+		return out;
+	double offset = 0;
+	const QStringList lines = QString::fromUtf8(f.readAll()).split('\n');
+	for (QString line : lines) {
+		line = line.trimmed();
+		if (line.startsWith("file ")) {
+			QString p = line.mid(5).trimmed();
+			// 'a'\''b' 형태 되돌리기
+			p.replace("'\\''", "\x01");
+			p.remove('\'');
+			p.replace("\x01", "'");
+			JoinedPart part;
+			part.file = QDir::toNativeSeparators(p);
+			part.offset = offset;
+			out.push_back(part);
+		} else if (line.startsWith("duration ") && !out.isEmpty()) {
+			out.back().duration = line.mid(9).trimmed().toDouble();
+			offset = out.back().offset + out.back().duration;
+		}
+	}
+	return out;
+}
+
+QString makeJoined(const QStringList &files, QString *error)
+{
+	if (files.size() < 2) {
+		if (error)
+			*error = "파일을 두 개 이상 골라 주세요";
+		return {};
+	}
+	QString text = "ffconcat version 1.0\n# ERKillCut 묶음 — 한 방송이 여러 파일로 나뉜 것을 순서대로 이어 붙임\n";
+	int w0 = 0, h0 = 0;
+	bool audio0 = true;
+	QStringList abs;
+	for (int i = 0; i < files.size(); ++i) {
+		const QString a = QFileInfo(files[i]).absoluteFilePath();
+		const VideoInfo vi = probeOne(a);
+		if (!vi.ok) {
+			if (error)
+				*error = QString("%1 을(를) 열 수 없어요: %2").arg(QFileInfo(a).fileName(), vi.error);
+			return {};
+		}
+		if (i == 0) {
+			w0 = vi.width;
+			h0 = vi.height;
+			audio0 = vi.hasAudio;
+		} else if (vi.width != w0 || vi.height != h0) {
+			if (error)
+				*error = QString("해상도가 다른 파일은 묶을 수 없어요\n%1: %2×%3\n%4: %5×%6")
+						 .arg(QFileInfo(files[0]).fileName())
+						 .arg(w0)
+						 .arg(h0)
+						 .arg(QFileInfo(a).fileName())
+						 .arg(vi.width)
+						 .arg(vi.height);
+			return {};
+		} else if (vi.hasAudio != audio0) {
+			if (error)
+				*error = "소리가 있는 파일과 없는 파일은 묶을 수 없어요";
+			return {};
+		}
+		QString q = QDir::fromNativeSeparators(a);
+		q.replace("'", "'\\''");
+		text += QString("file '%1'\nduration %2\n").arg(q, num(vi.duration));
+		abs << a;
+	}
+	const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/joined";
+	QDir().mkpath(dir);
+	const QString name = QCryptographicHash::hash(abs.join('|').toUtf8(), QCryptographicHash::Sha1).toHex().left(16);
+	const QString path = dir + "/" + name + ".ffconcat";
+	// 내용이 같으면 다시 쓰지 않음 (수정 시각이 바뀌면 분석 결과 저장 위치가 달라짐)
+	QFile old(path);
+	if (old.open(QIODevice::ReadOnly) && QString::fromUtf8(old.readAll()) == text)
+		return path;
+	old.close();
+	QSaveFile f(path);
+	if (!f.open(QIODevice::WriteOnly) || f.write(text.toUtf8()) < 0 || !f.commit()) {
+		if (error)
+			*error = "묶음 목록을 저장하지 못했어요: " + path;
+		return {};
+	}
+	return path;
+}
+
+QStringList inputArgs(const QString &path)
+{
+	if (isJoined(path))
+		return {"-f", "concat", "-safe", "0", "-i", path};
+	return {"-i", path};
+}
+
+QString displayName(const QString &path)
+{
+	if (!isJoined(path))
+		return QFileInfo(path).fileName();
+	const auto parts = readJoined(path);
+	if (parts.isEmpty())
+		return QFileInfo(path).fileName();
+	return QString("%1 외 %2개").arg(QFileInfo(parts.first().file).fileName()).arg(parts.size() - 1);
 }

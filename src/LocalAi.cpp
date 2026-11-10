@@ -209,9 +209,10 @@ void LocalAi::nextTranscribe()
 	disconnect(&m_proc, &QProcess::finished, this, nullptr);
 	connect(&m_proc, &QProcess::finished, this, &LocalAi::onExtracted);
 	setQuietProcess(m_proc, false);
-	m_proc.start(ffmpegPath(), {"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-ss", num(from), "-t",
-				    num(c.peak + kAfter - from), "-i", m_video, "-vn", "-ac", "1", "-ar", "16000", "-c:a",
-				    "pcm_s16le", m_tmp->filePath("a.wav")});
+	m_proc.start(ffmpegPath(), QStringList{"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-ss", num(from), "-t",
+					       num(c.peak + kAfter - from)} +
+					   inputArgs(m_video) +
+					   QStringList{"-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", m_tmp->filePath("a.wav")});
 }
 
 void LocalAi::onExtracted(int code, QProcess::ExitStatus)

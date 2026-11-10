@@ -108,10 +108,11 @@ void Thumbs::startNext()
 	m_cur = m_jobs.takeFirst();
 	// 1초에 한 장: 칸 가운데(+0.5초) 장면. -start_number 로 파일 이름 = 원본 초
 	setQuietProcess(m_proc, true);
-	m_proc.start(ffmpegPath(), {"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-ss",
-				    QString::number(m_cur.first), "-t", QString::number(m_cur.count), "-i", m_path, "-an",
-				    "-sn", "-vf", QString("fps=1,scale=-2:%1").arg(kHeight), "-q:v", "7", "-start_number",
-				    QString::number(m_cur.first), m_dir + "/%06d.jpg"});
+	m_proc.start(ffmpegPath(), QStringList{"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-ss",
+					       QString::number(m_cur.first), "-t", QString::number(m_cur.count)} +
+					   inputArgs(m_path) +
+					   QStringList{"-an", "-sn", "-vf", QString("fps=1,scale=-2:%1").arg(kHeight), "-q:v", "7",
+						       "-start_number", QString::number(m_cur.first), m_dir + "/%06d.jpg"});
 }
 
 void Thumbs::onFinished(int, QProcess::ExitStatus)

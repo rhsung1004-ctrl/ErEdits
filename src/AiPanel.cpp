@@ -347,8 +347,8 @@ void AiPanel::pickChatRect()
 	const double t = m_now ? m_now() : m_duration / 2;
 	// 지금 장면 한 장 (채팅이 떠 있는 장면에서 누르세요)
 	QProcess ff;
-	ff.start(ffmpegPath(), {"-hide_banner", "-nostdin", "-loglevel", "error", "-ss", num(t), "-i", m_path, "-frames:v", "1",
-				"-f", "image2pipe", "-vcodec", "png", "-"});
+	ff.start(ffmpegPath(), QStringList{"-hide_banner", "-nostdin", "-loglevel", "error", "-ss", num(t)} + inputArgs(m_path) +
+				       QStringList{"-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"});
 	ff.waitForFinished(20000);
 	const QImage img = QImage::fromData(ff.readAllStandardOutput(), "PNG");
 	if (img.isNull()) {

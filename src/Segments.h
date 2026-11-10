@@ -10,6 +10,7 @@ struct KillEvent {
 		Confirmed = 1,  // 전·후 숫자를 읽어 K 또는 A 가 실제로 올라간 것을 확인
 		Rejected = 2,   // 숫자 모양은 바뀌었지만 K·A 값은 그대로 → 잘못 잡힌 킬 (클립에서 뺌)
 		Unreadable = 3, // 숫자를 읽지 못함 (모양 변화만 믿음)
+		Doubtful = 4,   // 숫자가 그대로로 읽혔지만 빼기를 꺼 둠 → 클립에 남기고 "확인 필요"로 표시
 	};
 	double time = 0; // 원본 영상 기준 초
 	bool kill = false;
@@ -17,6 +18,7 @@ struct KillEvent {
 	int kills = 1;   // 이때 올라간 K 수 (확인했을 때만 정확, 동시에 두 킬이면 2)
 	int assists = 1; // 이때 올라간 A 수
 	int check = Unchecked;
+	double origTime = -1; // 처음 찾은 시각 (숫자 확인이 시각을 당기기 전)
 	bool counts() const { return check != Rejected && (kill || assist); }
 };
 

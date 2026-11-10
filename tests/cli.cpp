@@ -2,6 +2,7 @@
 //   erkillcut_cli scan <영상> [fast] [x y w h]
 //   erkillcut_cli rank <영상> [최대등수] [fast]       — 킬 + 결과 화면 찾기 → 킬 숫자 확인 → 등수 읽기 → 판별 결과
 //   erkillcut_cli readhud <그림> [그림 ...]            — 킬 숫자 줄(TK·K·A)만 잘라 낸 그림에서 숫자 읽기
+//   erkillcut_cli join <영상1> <영상2> ...             — 여러 파일 묶음 목록 만들기 (경로 출력)
 //   erkillcut_cli chzzkpage <응답.json>                — 치지직 다시보기 채팅 응답 한 장 읽기
 //   erkillcut_cli highlights <영상> <채팅.json> [AI]   — 킬·소리·채팅 → 잘한 장면 점수·재밌는 장면 후보 (AI: 로컬 AI 확인까지)
 //        채팅.json = [[초, "내용"], ...]  /  AI 설정은 ERKCLI_WHISPER, ERKCLI_WMODEL, ERKCLI_OLLAMA, ERKCLI_MODEL
@@ -41,6 +42,18 @@ int main(int argc, char *argv[])
 		out << "usage: scan <video> [fast] [x y w h] | export <video> <out> <s-e,...> [xfade fin fout]\n";
 		return 2;
 	}
+	if (a[1] == "join" && a.size() >= 4) { // 여러 파일 → 묶음 목록 경로
+		QString err;
+		const QString p = makeJoined(a.mid(2), &err);
+		out << (p.isEmpty() ? "error " + err : p) << "\n";
+		if (!p.isEmpty()) {
+			QFile f(p);
+			f.open(QIODevice::ReadOnly);
+			out << f.readAll();
+		}
+		return p.isEmpty() ? 1 : 0;
+	}
+
 	if (a[1] == "chzzkfetch" && a.size() >= 3) { // 영상 없이: 다시보기 주소/번호
 		auto *cz = new ChzzkChat(&app);
 		QObject::connect(cz, &ChzzkChat::info, [&out](const QString &t, double d) { out << "info " << t << " " << d << "\n"; });
@@ -256,10 +269,12 @@ int main(int argc, char *argv[])
 		});
 		QObject::connect(&kv, &KillVerifier::finished, [&](const QVector<KillEvent> &ev) {
 			events = ev;
-			static const char *names[] = {"미확인", "확인됨", "잘못 잡힘", "못 읽음"};
+			static const char *names[] = {"미확인", "확인됨", "잘못 잡힘", "못 읽음", "확인 필요"};
 			for (const KillEvent &e : events)
-				out << "verify t=" << formatTime(e.time) << " " << names[e.check] << " kill=" << e.kill << "x" << e.kills
-				    << " assist=" << e.assist << "\n";
+				out << "verify t=" << formatTime(e.origTime) << (std::abs(e.time - e.origTime) > 0.05 ? " -> " + formatTime(e.time) : QString())
+				    << " " << names[e.check] << " kill=" << e.kill << "x" << e.kills << " assist=" << e.assist << "\n";
+			if (qEnvironmentVariableIsSet("ERKCLI_RECORD"))
+				out << "record " << kv.saveRecord(qEnvironmentVariable("ERKCLI_RECORD")) << "\n";
 			out.flush();
 			rd.start(a[2], game, cands);
 		});
@@ -307,6 +322,7 @@ int main(int argc, char *argv[])
 		if (a.size() > 7)
 			s.fadeOut = a[7].toDouble();
 		s.cpuOnly = true;
+		s.normalizeAudio = qEnvironmentVariableIsSet("ERKCLI_LOUDNORM");
 		QVector<Subtitle> subs;
 		if (a.size() > 8)
 			for (const QString &p : a[8].split(';', Qt::SkipEmptyParts)) {
