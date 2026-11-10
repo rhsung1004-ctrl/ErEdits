@@ -34,6 +34,7 @@ struct Segment {
 	int kind = Kill;     // Fun = 분위기 환기용 재밌는 장면 (AI 편집점에서 넣음)
 	int score = -1;      // 잘한 장면 점수 0~100 (-1 = 아직 없음)
 	QString note;        // 점수 이유 / 재밌는 장면 한 줄 설명
+	int source = 0;      // 여러 방송을 합쳐 내보낼 때 몇 번째 방송인지 (저장하지 않음)
 	double length() const { return end - start; }
 };
 

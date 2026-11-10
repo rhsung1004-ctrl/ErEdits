@@ -28,6 +28,7 @@ add_executable(ERKillCut WIN32
   src/Games.h           src/Games.cpp
   src/RankReader.h      src/RankReader.cpp
   src/KillVerifier.h    src/KillVerifier.cpp
+  src/VodList.h         src/VodList.cpp
   src/EditTimeline.h    src/EditTimeline.cpp
   src/Thumbs.h          src/Thumbs.cpp
   src/Highlights.h      src/Highlights.cpp

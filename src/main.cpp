@@ -4,6 +4,7 @@
 
 #include <QApplication>
 #include <QTabWidget>
+#include <QPushButton>
 #include <QTimer>
 #include <QStyleFactory>
 
@@ -25,8 +26,17 @@ int main(int argc, char *argv[])
 		w.openFiles(args.mid(1)); // 영상 파일을 exe 위에 끌어 놓아도 열림 (여러 개면 묶기)
 	// 개발용: 화면 모양 확인 (ERKILLCUT_SNAPSHOT=파일.png 이면 3초 뒤 창을 저장하고 종료)
 	const QString snap = qEnvironmentVariable("ERKILLCUT_SNAPSHOT");
+	// 개발용: ERKILLCUT_TEST_BATCH 이면 시작하자마자 [모두 킬 찾기]
+	if (qEnvironmentVariableIsSet("ERKILLCUT_TEST_BATCH"))
+		QTimer::singleShot(500, &w, [&w] {
+			for (auto *b : w.findChildren<QPushButton *>())
+				if (b->text().contains("모두 킬 찾기")) {
+					b->click();
+					break;
+				}
+		});
 	if (!snap.isEmpty())
-		QTimer::singleShot(3000, &w, [&w, snap] {
+		QTimer::singleShot(qEnvironmentVariableIsSet("ERKILLCUT_SNAPSHOT_DELAY") ? qEnvironmentVariableIntValue("ERKILLCUT_SNAPSHOT_DELAY") : 3000, &w, [&w, snap] {
 			if (qEnvironmentVariableIsSet("ERKILLCUT_SNAPSHOT_TAB"))
 				for (auto *t : w.findChildren<QTabWidget *>())
 					t->setCurrentIndex(qEnvironmentVariableIntValue("ERKILLCUT_SNAPSHOT_TAB"));

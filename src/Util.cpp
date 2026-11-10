@@ -6,6 +6,7 @@
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QSaveFile>
@@ -344,6 +345,19 @@ double seekPreRoll(const QString &path)
 	}
 	cache.insert(path, v);
 	return v;
+}
+
+QString scanCachePath(const QString &video)
+{
+	if (video.isEmpty())
+		return {};
+	const QFileInfo fi(video);
+	const QByteArray key = (fi.absoluteFilePath() + "|" + QString::number(fi.size()) + "|" +
+				QString::number(fi.lastModified().toSecsSinceEpoch()))
+				       .toUtf8();
+	const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/scans";
+	QDir().mkpath(dir);
+	return dir + "/" + QCryptographicHash::hash(key, QCryptographicHash::Sha1).toHex().left(20) + ".json";
 }
 
 QString displayName(const QString &path)

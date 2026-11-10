@@ -119,6 +119,35 @@ int main(int argc, char *argv[])
 		return 0;
 	}
 
+	if (a[1] == "exportmulti" && a.size() >= 5) { // exportmulti 결과.mp4 크로스페이드 "영상|0-5,10-15" "영상|..."
+		QVector<ExportSource> srcs;
+		for (int k = 4; k < a.size(); ++k) {
+			ExportSource es;
+			es.path = a[k].section('|', 0, 0);
+			es.info = probeVideo(es.path);
+			for (const QString &p : a[k].section('|', 1).split(',', Qt::SkipEmptyParts)) {
+				Segment sg;
+				sg.start = p.section('-', 0, 0).toDouble();
+				sg.end = p.section('-', 1, 1).toDouble();
+				es.segments.push_back(sg);
+			}
+			srcs.push_back(es);
+		}
+		ExportSettings s;
+		s.outPath = a[2];
+		s.height = 720;
+		s.crossfade = a[3].toDouble();
+		s.cpuOnly = true;
+		Exporter ex;
+		QObject::connect(&ex, &Exporter::finished, [&](bool ok, const QString &msg) {
+			out << ex.lastFilter() << "\n" << "finished ok=" << ok << " " << msg << "\n";
+			out.flush();
+			app.exit(ok ? 0 : 1);
+		});
+		ex.startMulti(srcs, s);
+		return app.exec();
+	}
+
 	const VideoInfo info = probeVideo(a[2]);
 	out << "info ok=" << info.ok << " " << info.width << "x" << info.height << " fps=" << info.fps
 	    << " dur=" << info.duration << " audio=" << info.hasAudio << "\n";

@@ -8,6 +8,7 @@
 #include "SubtitlePanel.h"
 #include "TimelineBar.h"
 #include "VideoView.h"
+#include "VodList.h"
 
 #include <QApplication>
 #include <QAudioOutput>
@@ -49,6 +50,8 @@
 #include <QVBoxLayout>
 #include <QTabWidget>
 #include <QTextStream>
+#include <QRegularExpression>
+#include <QTimer>
 
 #include <algorithm>
 #include <cmath>
@@ -130,6 +133,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 		saveCache();
 		if (!m_cands.isEmpty() && !m_readsDone)
 			startRankRead();
+		else
+			analysisDone();
 	});
 	connect(m_rankReader, &RankReader::progress, this, [this](int done, int total) {
 		m_rankStatus->setText(QString("결과 화면에서 등수 읽는 중… %1 / %2").arg(done).arg(total));
@@ -140,6 +145,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 		setBusy(false, false);
 		rebuildGames();
 		saveCache();
+		analysisDone();
 	});
 
 	connect(m_exporter, &Exporter::progress, this,
@@ -488,6 +494,8 @@ void MainWindow::buildUi()
 	rl->addWidget(g1);
 	m_subPanel = new SubtitlePanel;
 	auto *tabs = new QTabWidget;
+	m_vodList = new VodList;
+	tabs->addTab(m_vodList, "방송 목록");
 	tabs->addTab(g2, "2. 클립 (킬 장면만 남기기)");
 	tabs->addTab(buildRankTab(), "판 등수");
 	m_aiPanel = new AiPanel;
@@ -529,7 +537,29 @@ void MainWindow::buildUi()
 	});
 	tabs->addTab(m_subPanel, "자막");
 	tabs->addTab(g3, "3. 내보내기");
+	tabs->setCurrentIndex(1);
 	rl->addWidget(tabs, 1);
+	connect(m_vodList, &VodList::openRequested, this, &MainWindow::switchVod);
+	connect(m_vodList, &VodList::addRequested, this, &MainWindow::addVods);
+	connect(m_vodList, &VodList::analyzeAllRequested, this, [this] {
+		if (anyBusy()) {
+			QMessageBox::information(this, "작업 중", "지금 하는 분석이나 내보내기가 끝난 뒤에 시작할 수 있어요.");
+			return;
+		}
+		saveCache();
+		m_batch = true;
+		m_batchTried.clear();
+		m_vodList->setBatchRunning(true);
+		batchNext();
+	});
+	connect(m_vodList, &VodList::stopRequested, this, [this] {
+		stopBatch("모두 킬 찾기를 멈췄어요.");
+		m_scanner->cancel();
+		m_verifier->cancel();
+		m_rankReader->cancel();
+		setBusy(false, false);
+	});
+	connect(m_vodList, &VodList::combineRequested, this, &MainWindow::exportCombined);
 	rl->addWidget(exportBar);
 	right->setMinimumWidth(520);
 
@@ -869,6 +899,8 @@ void MainWindow::openVideo(const QString &path)
 	refreshTable();
 	subtitlesChanged();
 	setBusy(false, false);
+	m_vodList->addPath(path);
+	m_vodList->setCurrent(path);
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *e)
@@ -945,7 +977,7 @@ void MainWindow::startScan()
 		if (m_path.isEmpty())
 			return;
 	}
-	if (!m_events.isEmpty() || m_edited) {
+	if ((!m_events.isEmpty() || m_edited) && !m_noAsk) {
 		if (QMessageBox::question(this, "다시 분석",
 					  "지금 있는 킬 목록과 클립을 지우고 처음부터 다시 분석할까요?") !=
 		    QMessageBox::Yes)
@@ -999,12 +1031,16 @@ void MainWindow::onScanFinished(bool ok, const QString &msg)
 		rebuildSegments(true);
 	saveCache();
 	// 킬 숫자 확인 → 결과 화면 후보에서 등수 읽기 (멈춘 경우에도 그때까지 찾은 만큼)
-	if (!m_events.isEmpty())
+	if (!ok && m_batch)
+		stopBatch("분석이 멈춰서 모두 킬 찾기도 멈췄어요.");
+	if (!m_events.isEmpty()) {
 		startVerify();
-	else if (!m_cands.isEmpty())
+	} else if (!m_cands.isEmpty()) {
 		startRankRead();
-	else
+	} else {
 		rebuildGames();
+		analysisDone();
+	}
 }
 
 void MainWindow::startVerify()
@@ -1246,14 +1282,7 @@ void MainWindow::startExport()
 	st.setValue("exportDir", QFileInfo(out).absolutePath());
 	st.setValue("lastExport", out);
 
-	ExportSettings s;
-	s.height = m_res->currentData().toInt();
-	s.fps = m_fps->currentData().toDouble();
-	s.crossfade = m_xfade->value();
-	s.fadeIn = m_fadeIn->value();
-	s.fadeOut = m_fadeOut->value();
-	s.cpuOnly = m_cpuOnly->isChecked();
-	s.normalizeAudio = m_loudnorm->isChecked();
+	ExportSettings s = exportSettings();
 	s.outPath = out;
 	m_player->pause();
 	m_exportProgress->setValue(0);
@@ -1276,21 +1305,15 @@ void MainWindow::setBusy(bool scanning, bool exporting)
 	const bool reading = m_rankReader->isRunning();
 	m_btnReadRanks->setEnabled(hasVideo && !scanning && !exporting && !reading && !m_cands.isEmpty());
 	m_gameArea->setEnabled(!scanning);
+	if (m_vodList)
+		m_vodList->setBusy(scanning || exporting || verifying || reading);
 }
 
 // ───────────────────────── 분석 결과 저장 ─────────────────────────
 
 QString MainWindow::cachePath() const
 {
-	if (m_path.isEmpty())
-		return {};
-	const QFileInfo fi(m_path);
-	const QByteArray key = (fi.absoluteFilePath() + "|" + QString::number(fi.size()) + "|" +
-				QString::number(fi.lastModified().toSecsSinceEpoch()))
-				       .toUtf8();
-	const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/scans";
-	QDir().mkpath(dir);
-	return dir + "/" + QCryptographicHash::hash(key, QCryptographicHash::Sha1).toHex().left(20) + ".json";
+	return scanCachePath(m_path);
 }
 
 void MainWindow::saveCache()
@@ -1316,6 +1339,9 @@ void MainWindow::saveCache()
 	QFile f(cachePath());
 	if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
 		f.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
+	f.close();
+	if (m_vodList)
+		m_vodList->refreshStatus(m_path);
 }
 
 bool MainWindow::loadCache()
@@ -1739,4 +1765,197 @@ void MainWindow::setFunClips(const QVector<int> &indices, bool add)
 		m_summary->setText(QString("<span style='color:#e9a'>재밌는 장면 %1개 중 %2개는 다른 클립과 겹쳐서 넣지 못했어요</span>")
 					   .arg(indices.size())
 					   .arg(indices.size() - added));
+}
+
+// ───────────────────────── 여러 방송 ─────────────────────────
+
+bool MainWindow::anyBusy() const
+{
+	return m_scanner->isRunning() || m_exporter->isRunning() || m_rankReader->isRunning() || m_verifier->isRunning();
+}
+
+ExportSettings MainWindow::exportSettings() const
+{
+	ExportSettings s;
+	s.height = m_res->currentData().toInt();
+	s.fps = m_fps->currentData().toDouble();
+	s.crossfade = m_xfade->value();
+	s.fadeIn = m_fadeIn->value();
+	s.fadeOut = m_fadeOut->value();
+	s.cpuOnly = m_cpuOnly->isChecked();
+	s.normalizeAudio = m_loudnorm->isChecked();
+	return s;
+}
+
+void MainWindow::switchVod(const QString &path)
+{
+	if (path == m_path)
+		return;
+	if (anyBusy()) {
+		QMessageBox::information(this, "작업 중", "분석이나 내보내기가 끝난 뒤에 다른 방송을 열 수 있어요.");
+		m_vodList->setCurrent(m_path);
+		return;
+	}
+	if (!QFileInfo::exists(path) && !isJoined(path)) {
+		QMessageBox::warning(this, "열 수 없음", "영상 파일을 찾을 수 없어요:\n" + QDir::toNativeSeparators(path));
+		m_vodList->setCurrent(m_path);
+		return;
+	}
+	saveCache();
+	openVideo(path);
+	if (m_path != path) // 열지 못함
+		m_vodList->setCurrent(m_path);
+}
+
+void MainWindow::addVods()
+{
+	QSettings s;
+	const QStringList files = QFileDialog::getOpenFileNames(
+		this, "목록에 넣을 방송 다시보기 (여러 개를 고르면 각각 다른 방송으로)", s.value("lastDir").toString(),
+		"영상 (*.mp4 *.mkv *.ts *.flv *.mov *.webm *.m4v *.avi);;모든 파일 (*)");
+	if (files.isEmpty())
+		return;
+	s.setValue("lastDir", QFileInfo(files.first()).absolutePath());
+	QStringList sorted = files;
+	std::sort(sorted.begin(), sorted.end(), [](const QString &a, const QString &b) {
+		return QString::compare(QFileInfo(a).fileName(), QFileInfo(b).fileName(), Qt::CaseInsensitive) < 0;
+	});
+	for (const QString &f : sorted)
+		m_vodList->addPath(f);
+	if (m_path.isEmpty())
+		switchVod(sorted.first());
+}
+
+void MainWindow::stopBatch(const QString &why)
+{
+	if (!m_batch)
+		return;
+	m_batch = false;
+	m_vodList->setBatchRunning(false);
+	if (!why.isEmpty())
+		m_scanStatus->setText(m_scanStatus->text() + "<br><b>" + why.toHtmlEscaped() + "</b>");
+}
+
+void MainWindow::analysisDone()
+{
+	if (!m_batch)
+		return;
+	QTimer::singleShot(300, this, [this] {
+		if (m_batch && !anyBusy())
+			batchNext();
+	});
+}
+
+void MainWindow::batchNext()
+{
+	if (!m_batch)
+		return;
+	QString next;
+	for (const QString &p : m_vodList->paths()) {
+		if (m_batchTried.contains(p))
+			continue;
+		if (!VodList::readStatus(p).analyzed) {
+			next = p;
+			break;
+		}
+	}
+	if (next.isEmpty()) {
+		const int n = int(m_batchTried.size());
+		stopBatch(QString());
+		m_scanStatus->setText(QString("<b>모두 킬 찾기 끝</b> · 방송 %1개를 분석했어요. [방송 목록]에서 방송을 눌러 편집하세요.").arg(n));
+		return;
+	}
+	m_batchTried << next;
+	if (next != m_path) {
+		saveCache();
+		openVideo(next);
+	}
+	if (m_path != next) { // 열지 못함 → 다음
+		QTimer::singleShot(0, this, &MainWindow::batchNext);
+		return;
+	}
+	if (m_edited) { // 중간까지 분석하고 직접 고친 방송은 지우지 않도록 건너뜀
+		QTimer::singleShot(0, this, &MainWindow::batchNext);
+		return;
+	}
+	m_noAsk = true;
+	startScan();
+	m_noAsk = false;
+	m_scanStatus->setText(QString("모두 킬 찾기 · %1번째 방송 분석을 시작하는 중…").arg(m_batchTried.size()));
+}
+
+void MainWindow::exportCombined()
+{
+	if (anyBusy()) {
+		QMessageBox::information(this, "작업 중", "지금 하는 분석이나 내보내기가 끝난 뒤에 내보낼 수 있어요.");
+		return;
+	}
+	saveCache();
+	QVector<ExportSource> sources;
+	QStringList skipped;
+	int clips = 0;
+	for (const QString &p : m_vodList->checkedPaths()) {
+		QFile f(scanCachePath(p));
+		if (!f.open(QIODevice::ReadOnly)) {
+			skipped << displayName(p) + " (분석 안 함)";
+			continue;
+		}
+		const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+		ExportSource src;
+		src.path = p;
+		src.segments = segmentsFromJson(o["segments"].toArray());
+		std::sort(src.segments.begin(), src.segments.end(),
+			  [](const Segment &a, const Segment &b) { return a.start < b.start; });
+		src.subtitles = subtitlesFromJson(o["subtitles"].toArray());
+		const int on = int(std::count_if(src.segments.begin(), src.segments.end(),
+						 [](const Segment &s) { return s.enabled && s.length() > 0.2; }));
+		if (on == 0) {
+			skipped << displayName(p) + " (켜 둔 클립 없음)";
+			continue;
+		}
+		src.info = p == m_path ? m_info : probeVideo(p);
+		if (!src.info.ok) {
+			skipped << displayName(p) + " (열 수 없음)";
+			continue;
+		}
+		clips += on;
+		sources.push_back(src);
+	}
+	if (sources.isEmpty()) {
+		QMessageBox::information(this, "합쳐서 내보내기",
+					 "내보낼 클립이 있는 방송이 없어요. 방송을 체크하고 킬을 찾아 주세요." +
+						 (skipped.isEmpty() ? QString() : "\n\n빠진 방송:\n" + skipped.join("\n")));
+		return;
+	}
+	QString msg = QString("방송 %1개의 클립 %2개를 목록 순서대로 한 편으로 합쳐요.").arg(sources.size()).arg(clips);
+	if (!skipped.isEmpty())
+		msg += "\n\n빠지는 방송:\n" + skipped.join("\n");
+	if (!skipped.isEmpty() && QMessageBox::question(this, "합쳐서 내보내기", msg + "\n\n계속할까요?") != QMessageBox::Yes)
+		return;
+
+	QSettings st;
+	const QFileInfo fi(sources.first().path);
+	QString base = isJoined(sources.first().path) ? displayName(sources.first().path) : fi.completeBaseName();
+	base.replace(QRegularExpression(R"([\\/:*?"<>|])"), "_");
+	if (sources.size() > 1)
+		base += QString("_외%1개").arg(sources.size() - 1);
+	const QString suggestion =
+		QDir(st.value("exportDir", fi.absolutePath()).toString()).filePath(base + "_킬하이라이트.mp4");
+	const QString out = QFileDialog::getSaveFileName(this, "합친 결과 영상 저장", suggestion, "MP4 영상 (*.mp4)");
+	if (out.isEmpty())
+		return;
+	for (const ExportSource &src : sources)
+		if (QFileInfo(out).absoluteFilePath() == QFileInfo(src.path).absoluteFilePath()) {
+			QMessageBox::warning(this, "내보내기", "원본 파일과 다른 이름으로 저장해 주세요.");
+			return;
+		}
+	st.setValue("exportDir", QFileInfo(out).absolutePath());
+	st.setValue("lastExport", out);
+	ExportSettings s = exportSettings();
+	s.outPath = out;
+	m_player->pause();
+	m_exportProgress->setValue(0);
+	m_exportStatus->setText(QString("합쳐서 내보내는 중… (방송 %1개, 클립 %2개)").arg(sources.size()).arg(clips));
+	setBusy(false, true);
+	m_exporter->startMulti(sources, s);
 }

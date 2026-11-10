@@ -96,16 +96,16 @@ QVector<Exporter::Input> Exporter::inputs(const QVector<Segment> &segs, double d
 	QVector<Input> in;
 	for (int k = 0; k < n; ++k) {
 		if (k > 0 && D > 0) {
-			in.push_back({segs[k - 1].start + (N[k - 1] - D) / fps, D, Input::Tail});
-			in.push_back({segs[k].start, D, Input::Head});
+			in.push_back({segs[k - 1].start + (N[k - 1] - D) / fps, D, Input::Tail, segs[k - 1].source});
+			in.push_back({segs[k].start, D, Input::Head, segs[k].source});
 		}
 		const qint64 a = (k > 0 ? D : 0), b = (k < n - 1 ? D : 0);
-		in.push_back({segs[k].start + a / fps, std::max<qint64>(1, N[k] - a - b), Input::Body});
+		in.push_back({segs[k].start + a / fps, std::max<qint64>(1, N[k] - a - b), Input::Body, segs[k].source});
 	}
 	return in;
 }
 
-QString Exporter::buildFilter(const QVector<Segment> &segs, const QVector<Overlay> &overlays, const VideoInfo &info,
+QString Exporter::buildFilter(const QVector<Segment> &segs, const QVector<Overlay> &overlays, const QVector<SourceMeta> &src,
 			      const ExportSettings &s, int W, int H, double fps, double *totalOut)
 {
 	const double d = frameCrossfade(segs, s.crossfade, fps);
@@ -115,7 +115,8 @@ QString Exporter::buildFilter(const QVector<Segment> &segs, const QVector<Overla
 
 	for (int i = 0; i < in.size(); ++i) {
 		const QString L = QString::number(in[i].frames / fps, 'f', 6);
-		const QString P = fmt(std::clamp(in[i].start, 0.0, s.preRoll));
+		const SourceMeta &sm = src.value(in[i].source);
+		const QString P = fmt(std::clamp(in[i].start, 0.0, sm.preRoll));
 		// 조금 앞부터 읽은 뒤 시각 그대로 잘라 냄 (첫 장면 시각으로 0을 맞추면 .ts 처럼 찾아가기가 부정확한 영상에서
 		// 앞쪽 장면이 빠진 만큼 그림이 소리보다 빨라짐). 그림·소리 모두 같은 시각 기준
 		// 그림은 프레임 수로, 소리는 같은 길이로 잘라 조각마다 어긋남이 쌓이지 않게. 16:9 캔버스 가운데에 맞춤
@@ -127,7 +128,7 @@ QString Exporter::buildFilter(const QVector<Segment> &segs, const QVector<Overla
 				 .arg(rate)
 				 .arg(W)
 				 .arg(H);
-		if (info.hasAudio)
+		if (sm.hasAudio)
 			parts << QString("[%1:a]atrim=start=" + P + ",asetpts=PTS-" + P + "/TB,"
 					 "aresample=48000:async=1:min_hard_comp=0.02:first_pts=0,"
 					 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
@@ -265,17 +266,39 @@ QStringList Exporter::encoderArgs(const QString &enc, double fps)
 void Exporter::start(const QString &input, const VideoInfo &info, const QVector<Segment> &segments,
 		     const QVector<Subtitle> &subtitles, const ExportSettings &s)
 {
-	m_subs = subtitles;
+	startMulti({ExportSource{input, info, segments, subtitles}}, s);
+}
+
+void Exporter::startMulti(const QVector<ExportSource> &sources, const ExportSettings &s)
+{
 	cancel();
-	m_input = QFileInfo(input).absoluteFilePath(); // ffmpeg 는 임시 폴더에서 실행되므로 절대 경로로
-	m_info = info;
+	m_sources.clear();
 	m_segs.clear();
-	for (const Segment &seg : segments)
-		if (seg.enabled && seg.length() > 0.2)
-			m_segs.push_back(seg);
+	m_subs.clear();
+	for (const ExportSource &src : sources) {
+		const int idx = int(m_sources.size());
+		int used = 0;
+		for (Segment seg : src.segments)
+			if (seg.enabled && seg.length() > 0.2) {
+				seg.source = idx;
+				m_segs.push_back(seg);
+				++used;
+			}
+		if (used == 0 && sources.size() > 1)
+			continue; // 클립이 없는 방송은 건너뜀 (번호도 쓰지 않음)
+		SourceMeta m;
+		m.path = QFileInfo(src.path).absoluteFilePath(); // ffmpeg 는 임시 폴더에서 실행되므로 절대 경로로
+		m.hasAudio = src.info.hasAudio;
+		m.preRoll = std::max(3.0, seekPreRoll(m.path));
+		m_sources.push_back(m);
+		m_subs.push_back(src.subtitles);
+		if (m_sources.size() == 1) {
+			m_info = src.info;
+			m_input = m.path;
+		}
+	}
 	m_set = s;
 	m_set.outPath = QFileInfo(s.outPath).absoluteFilePath();
-	m_set.preRoll = std::max(3.0, seekPreRoll(m_input));
 	if (m_segs.isEmpty()) {
 		emit finished(false, "내보낼 클립이 없어요");
 		return;
@@ -306,36 +329,49 @@ void Exporter::run(const QString &encoder)
 	QStringList overlayArgs;
 	const QVector<Input> pieces = inputs(m_segs, d, fps);
 	const int firstInput = int(pieces.size());
-	for (int i = 0; i < m_subs.size() && m_tmp->isValid(); ++i) {
-		const Subtitle &sb = m_subs[i];
-		const QVector<SubtitlePiece> pieces = mapSubtitle(sb, m_segs, d);
-		if (pieces.isEmpty())
-			continue;
-		QPoint at;
-		const QImage img = renderSubtitleImage(sb, outW, outH, &at);
-		if (img.isNull())
-			continue;
-		const QString file = m_tmp->filePath(QString("sub_%1.png").arg(i));
-		if (!img.save(file, "PNG"))
-			continue;
-		for (const SubtitlePiece &pc : pieces) {
-			Overlay o;
-			o.start = pc.outStart;
-			o.end = std::min(pc.outEnd, total);
-			if (o.end - o.start < 0.05)
+	// 방송마다: 그 방송 클립들 기준으로 자막 시간을 옮긴 뒤, 결과 영상에서 그 방송이 시작하는 시각만큼 밀기
+	double blockStart = 0;
+	int segsBefore = 0;
+	for (int srcIdx = 0; srcIdx < m_sources.size(); ++srcIdx) {
+		QVector<Segment> own;
+		for (const Segment &sg : m_segs)
+			if (sg.source == srcIdx)
+				own.push_back(sg);
+		const double shift = blockStart - segsBefore * d;
+		for (int i = 0; i < m_subs[srcIdx].size() && m_tmp->isValid(); ++i) {
+			const Subtitle &sb = m_subs[srcIdx][i];
+			const QVector<SubtitlePiece> mapped = mapSubtitle(sb, own, d);
+			if (mapped.isEmpty())
 				continue;
-			const double f = sb.fade ? std::min(kSubtitleFade, (o.end - o.start) / 2) : 0;
-			o.fadeIn = pc.fadeIn ? f : 0;
-			o.fadeOut = pc.fadeOut ? f : 0;
-			o.x = at.x();
-			o.y = at.y();
-			o.input = firstInput + int(overlays.size());
-			overlays.push_back(o);
-			overlayArgs << "-loop" << "1" << "-framerate" << QString::number(fps, 'g', 6) << "-t"
-				    << fmt(o.end - o.start + 0.1) << "-i" << file;
+			QPoint at;
+			const QImage img = renderSubtitleImage(sb, outW, outH, &at);
+			if (img.isNull())
+				continue;
+			const QString file = m_tmp->filePath(QString("sub_%1_%2.png").arg(srcIdx).arg(i));
+			if (!img.save(file, "PNG"))
+				continue;
+			for (const SubtitlePiece &pc : mapped) {
+				Overlay o;
+				o.start = pc.outStart + shift;
+				o.end = std::min(pc.outEnd + shift, total);
+				if (o.end - o.start < 0.05)
+					continue;
+				const double f = sb.fade ? std::min(kSubtitleFade, (o.end - o.start) / 2) : 0;
+				o.fadeIn = pc.fadeIn ? f : 0;
+				o.fadeOut = pc.fadeOut ? f : 0;
+				o.x = at.x();
+				o.y = at.y();
+				o.input = firstInput + int(overlays.size());
+				overlays.push_back(o);
+				overlayArgs << "-loop" << "1" << "-framerate" << QString::number(fps, 'g', 6) << "-t"
+					    << fmt(o.end - o.start + 0.1) << "-i" << file;
+			}
 		}
+		for (const Segment &sg : own)
+			blockStart += sg.length();
+		segsBefore += int(own.size());
 	}
-	const QString filter = buildFilter(m_segs, overlays, m_info, m_set, outW, outH, fps, &m_total);
+	const QString filter = buildFilter(m_segs, overlays, m_sources, m_set, outW, outH, fps, &m_total);
 	m_lastFilter = filter;
 	m_script = std::make_unique<QTemporaryFile>(QDir::tempPath() + "/erkillcut_filter_XXXXXX.txt");
 	if (!m_script->open()) {
@@ -349,10 +385,11 @@ void Exporter::run(const QString &encoder)
 	QStringList args{"-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats"};
 	for (const Input &pc : pieces) {
 		// 앞뒤로 조금 넉넉히 읽고 필터에서 정확히 자름 (buildFilter 와 같은 앞 여유)
-		const double pre = std::clamp(pc.start, 0.0, m_set.preRoll);
+		const SourceMeta &sm = m_sources[pc.source];
+		const double pre = std::clamp(pc.start, 0.0, sm.preRoll);
 		// 조각마다 풀기 스레드를 줄여 둠 (CPU 코어가 많으면 조각 수 × 코어 수만큼 장면을 쌓아 두어 메모리가 커짐)
 		args << "-threads" << "4" << "-ss" << fmt(pc.start - pre) << "-t" << fmt(pc.frames / fps + pre + 1.0)
-		     << inputArgs(m_input);
+		     << inputArgs(sm.path);
 	}
 	args << overlayArgs;
 	if (ffmpegHasNewScriptOption())

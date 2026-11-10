@@ -28,6 +28,7 @@ class AiPanel;
 class JoinedPlayer;
 class Thumbs;
 class TimelineBar;
+class VodList;
 
 class MainWindow : public QMainWindow {
 	Q_OBJECT
@@ -49,6 +50,15 @@ private:
 	void startScan();
 	void onScanFinished(bool ok, const QString &msg);
 	void startVerify();
+	// 여러 방송: 분석이 (등수 읽기까지) 끝났을 때 → 모두 킬 찾기 중이면 다음 방송
+	void analysisDone();
+	void batchNext();
+	void stopBatch(const QString &why);
+	void addVods();
+	void switchVod(const QString &path);
+	void exportCombined();
+	ExportSettings exportSettings() const;
+	bool anyBusy() const;
 	void rebuildSegments(bool force);
 	void refreshTable();
 	void refreshSummary();
@@ -112,6 +122,10 @@ private:
 	KillScanner *m_scanner;
 	RankReader *m_rankReader;
 	KillVerifier *m_verifier;
+	VodList *m_vodList = nullptr;
+	bool m_batch = false;      // 모두 킬 찾기 중
+	bool m_noAsk = false;      // 다시 분석 확인을 묻지 않음 (모두 킬 찾기)
+	QStringList m_batchTried;
 	Thumbs *m_thumbs;
 	AiPanel *m_aiPanel = nullptr;
 	QVector<QVector<Segment>> m_undo, m_redo;
