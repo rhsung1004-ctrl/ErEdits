@@ -63,7 +63,7 @@ QJsonArray eventsToJson(const QVector<KillEvent> &events)
 	QJsonArray a;
 	for (const KillEvent &e : events)
 		a.append(QJsonObject{{"t", e.time}, {"k", e.kill}, {"a", e.assist}, {"n", e.kills}, {"na", e.assists},
-				     {"c", e.check}});
+				     {"c", e.check}, {"ot", e.origTime}});
 	return a;
 }
 
@@ -79,6 +79,7 @@ QVector<KillEvent> eventsFromJson(const QJsonArray &a)
 		e.kills = o["n"].toInt(1);
 		e.assists = o["na"].toInt(1);
 		e.check = o["c"].toInt(KillEvent::Unchecked);
+		e.origTime = o["ot"].toDouble(-1);
 		out.push_back(e);
 	}
 	return out;

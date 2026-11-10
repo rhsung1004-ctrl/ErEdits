@@ -269,10 +269,12 @@ int main(int argc, char *argv[])
 		});
 		QObject::connect(&kv, &KillVerifier::finished, [&](const QVector<KillEvent> &ev) {
 			events = ev;
-			static const char *names[] = {"미확인", "확인됨", "잘못 잡힘", "못 읽음"};
+			static const char *names[] = {"미확인", "확인됨", "잘못 잡힘", "못 읽음", "확인 필요"};
 			for (const KillEvent &e : events)
-				out << "verify t=" << formatTime(e.time) << " " << names[e.check] << " kill=" << e.kill << "x" << e.kills
-				    << " assist=" << e.assist << "\n";
+				out << "verify t=" << formatTime(e.origTime) << (std::abs(e.time - e.origTime) > 0.05 ? " -> " + formatTime(e.time) : QString())
+				    << " " << names[e.check] << " kill=" << e.kill << "x" << e.kills << " assist=" << e.assist << "\n";
+			if (qEnvironmentVariableIsSet("ERKCLI_RECORD"))
+				out << "record " << kv.saveRecord(qEnvironmentVariable("ERKCLI_RECORD")) << "\n";
 			out.flush();
 			rd.start(a[2], game, cands);
 		});

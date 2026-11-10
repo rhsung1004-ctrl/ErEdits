@@ -135,6 +135,8 @@ private:
 	QComboBox *m_scanMode;
 	QPushButton *m_btnScan;
 	QPushButton *m_btnVerify;
+	QPushButton *m_btnRecord;
+	QCheckBox *m_dropUnchanged;
 	QProgressBar *m_scanProgress;
 	QLabel *m_scanStatus;
 

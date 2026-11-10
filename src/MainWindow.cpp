@@ -116,11 +116,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 		const auto n = [&](int c) {
 			return int(std::count_if(m_events.begin(), m_events.end(), [c](const KillEvent &e) { return e.check == c; }));
 		};
-		QString t = QString("<b>분석 끝</b> · 킬 숫자 확인: 확인됨 %1 · 잘못 잡힌 킬 %2개 뺌 · 못 읽음 %3")
+		QString t = QString("<b>분석 끝</b> · 킬 숫자 확인: 확인됨 %1 · 못 읽음(그대로 둠) %2")
 				    .arg(n(KillEvent::Confirmed))
-				    .arg(n(KillEvent::Rejected))
 				    .arg(n(KillEvent::Unreadable));
+		if (n(KillEvent::Rejected) > 0)
+			t += QString(" · 숫자가 그대로인 킬 <b>%1개 뺌</b>").arg(n(KillEvent::Rejected));
+		if (n(KillEvent::Doubtful) > 0)
+			t += QString(" · 숫자가 그대로인 킬 %1개 (빼지 않음)").arg(n(KillEvent::Doubtful));
 		m_scanStatus->setText(t);
+		m_btnRecord->setEnabled(m_verifier->hasRecord());
 		rebuildGames(false);
 		rebuildSegments(!m_edited);
 		saveCache();
@@ -305,6 +309,44 @@ void MainWindow::buildUi()
 	scanRow->addWidget(m_btnScan, 1);
 	scanRow->addWidget(m_btnVerify);
 	l1->addLayout(scanRow);
+	m_dropUnchanged = new QCheckBox("숫자가 그대로인 킬은 빼기");
+	m_dropUnchanged->setToolTip("킬 전·후 여러 장면에서 K·A 숫자가 모두 그대로면 잘못 잡힌 킬로 보고 클립에서 빼요.\n"
+				    "끄면 빼지 않고 '확인 필요'로만 표시해요");
+	m_dropUnchanged->setChecked(QSettings().value("dropUnchanged", true).toBool());
+	m_btnRecord = smallButton("확인 기록 보기", "킬마다 앞·뒤 장면에서 읽은 숫자를 그림과 함께 브라우저로 보여 줘요");
+	m_btnRecord->setEnabled(false);
+	auto *chkRow = new QHBoxLayout;
+	chkRow->addWidget(m_dropUnchanged);
+	chkRow->addStretch(1);
+	chkRow->addWidget(m_btnRecord);
+	l1->addLayout(chkRow);
+	connect(m_dropUnchanged, &QCheckBox::toggled, this, [this](bool on) {
+		QSettings().setValue("dropUnchanged", on);
+		// 다시 읽지 않고 표시만 바꿈
+		bool any = false;
+		for (KillEvent &e : m_events) {
+			if (on && e.check == KillEvent::Doubtful) {
+				e.check = KillEvent::Rejected;
+				any = true;
+			} else if (!on && e.check == KillEvent::Rejected) {
+				e.check = KillEvent::Doubtful;
+				any = true;
+			}
+		}
+		if (any) {
+			rebuildGames(false);
+			rebuildSegments(!m_edited);
+			saveCache();
+		}
+	});
+	connect(m_btnRecord, &QPushButton::clicked, this, [this] {
+		const QString dir = cachePath().replace(".json", "_killcheck");
+		const QString html = m_verifier->saveRecord(dir);
+		if (html.isEmpty())
+			return;
+		QDesktopServices::openUrl(QUrl::fromLocalFile(html));
+		m_scanStatus->setText(m_scanStatus->text() + "<br>확인 기록: " + QDir::toNativeSeparators(dir).toHtmlEscaped());
+	});
 	l1->addWidget(m_scanProgress);
 	l1->addWidget(m_scanStatus);
 
@@ -971,6 +1013,7 @@ void MainWindow::startVerify()
 		return;
 	m_rankReader->cancel();
 	m_scanStatus->setText("킬 숫자 확인 중…");
+	m_verifier->setDropUnchanged(m_dropUnchanged->isChecked());
 	m_verifier->start(m_path, m_roi, m_events);
 	setBusy(false, false);
 }
