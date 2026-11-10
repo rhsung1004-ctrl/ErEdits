@@ -2,6 +2,8 @@
 
 #include "HudKillWatcher.h"
 
+#include <algorithm>
+
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
@@ -10,6 +12,7 @@
 #include <QStandardPaths>
 #include <QTextStream>
 #include <QFileInfo>
+#include <QHash>
 #include <QProcess>
 #include <QRegularExpression>
 
@@ -274,6 +277,57 @@ QStringList inputArgs(const QString &path)
 	if (isJoined(path))
 		return {"-f", "concat", "-safe", "0", "-i", path};
 	return {"-i", path};
+}
+
+static bool inaccurateSeek(const QString &file)
+{
+	static const QStringList ext{"ts", "m2ts", "mts", "m2t", "tp", "trp", "flv", "mpg", "mpeg", "vob"};
+	return ext.contains(QFileInfo(file).suffix().toLower());
+}
+
+double seekPreRoll(const QString &path)
+{
+	static QHash<QString, double> cache;
+	auto it = cache.constFind(path);
+	if (it != cache.constEnd())
+		return *it;
+	QString probe;
+	if (isJoined(path)) {
+		for (const JoinedPart &p : readJoined(path))
+			if (probe.isEmpty() && inaccurateSeek(p.file))
+				probe = p.file;
+	} else if (inaccurateSeek(path)) {
+		probe = path;
+	}
+	double v = 0;
+	if (!probe.isEmpty()) {
+		// 앞 60초의 키프레임 간격을 재서 가장 긴 간격 + 0.5초 (키프레임만 풀어서 빠름)
+		v = 3.0;
+		QProcess p;
+		setQuietProcess(p, false);
+		p.start(ffmpegPath(), {"-hide_banner", "-nostdin", "-skip_frame", "nokey", "-t", "60", "-i", probe, "-map", "0:v:0",
+				       "-vf", "showinfo", "-f", "null", "-"});
+		if (p.waitForFinished(30000)) {
+			static const QRegularExpression re(R"(pts_time:\s*([0-9.]+))");
+			auto it = re.globalMatch(QString::fromUtf8(p.readAllStandardError()));
+			double last = -1, gap = 0;
+			int n = 0;
+			while (it.hasNext()) {
+				const double t = it.next().captured(1).toDouble();
+				if (last >= 0)
+					gap = std::max(gap, t - last);
+				last = t;
+				++n;
+			}
+			if (n >= 3)
+				v = std::clamp(gap + 0.5, 1.0, 12.0);
+		} else {
+			p.kill();
+			p.waitForFinished(2000);
+		}
+	}
+	cache.insert(path, v);
+	return v;
 }
 
 QString displayName(const QString &path)

@@ -19,6 +19,7 @@ struct ExportSettings {
 	double fadeOut = 1.0;   // 영상 마지막 페이드 아웃 (초, 0 = 없음)
 	bool cpuOnly = false;   // 그래픽카드 인코더를 쓰지 않음
 	bool normalizeAudio = false; // 소리 크기를 유튜브 기준(-14 LUFS)으로 맞춤 — 클립마다 들쭉날쭉한 소리를 고르게
+	double preRoll = 3.0;        // 클립 앞에서 미리 읽는 최대 시간 (내보내기가 영상 키프레임 간격으로 정함)
 	QString outPath;
 };
 
@@ -37,6 +38,7 @@ public:
 	bool isRunning() const { return m_proc.state() != QProcess::NotRunning; }
 
 	// 실제로 쓰일 크로스페이드 길이 (가장 짧은 클립의 절반을 넘지 않게)
+	static double preRoll(const Segment &seg, double maxPre);
 	static double effectiveCrossfade(const QVector<Segment> &segments, double wanted);
 	// 결과 영상 길이
 	static double outputLength(const QVector<Segment> &segments, double crossfade);

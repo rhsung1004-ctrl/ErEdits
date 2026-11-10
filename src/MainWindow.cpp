@@ -228,8 +228,8 @@ void MainWindow::buildUi()
 	m_editTl = new EditTimeline;
 	m_editTl->setThumbs(m_thumbs);
 	m_editTl->setData(&m_segs, &m_events, 0);
-	auto *bSplit = smallButton("✂ 자르기 (S)", "재생 위치에서 클립을 둘로 나눠요. 필요 없는 쪽을 골라 삭제하면 컷 편집");
-	bSplit->setShortcut(QKeySequence(Qt::Key_S));
+	auto *bSplit = smallButton("✂ 자르기 (Ctrl+X)", "재생 위치에서 클립을 둘로 나눠요. 필요 없는 쪽을 골라 삭제하면 컷 편집");
+	bSplit->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_X));
 	auto *bCut = smallButton("🗑 클립 삭제 (Del)", "선택한 클립을 결과 영상에서 빼요");
 	bCut->setShortcut(QKeySequence::Delete);
 	m_btnUndo = smallButton("↶ 되돌리기", "Ctrl+Z");

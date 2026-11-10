@@ -10,7 +10,7 @@ class Thumbs;
 //  - 사용하는 클립만 이어 붙여 결과 영상 순서대로 보여 줌 (장면 썸네일 + 킬 표시)
 //  - 클릭: 그 위치로 이동 / 클립 선택,  선택한 클립의 양 끝 끌기: 길이 조절 (바깥으로 끌면 원본에서 늘어남)
 //  - Ctrl+휠: 확대/축소 (마우스 위치 기준), 휠: 확대했을 때 좌우 이동
-//  - 자르기(S)·삭제(Delete)·되돌리기(Ctrl+Z)는 메인 창 단축키
+//  - 자르기(Ctrl+X)·삭제(Delete)·되돌리기(Ctrl+Z)는 메인 창 단축키
 class EditTimeline : public QWidget {
 	Q_OBJECT
 public:

@@ -59,6 +59,12 @@ Exporter::~Exporter()
 	}
 }
 
+// 클립 앞에서 미리 읽는 시간 (키프레임까지 거슬러 올라가 첫 장면부터 제대로 나오게)
+double Exporter::preRoll(const Segment &seg, double maxPre)
+{
+	return std::clamp(seg.start, 0.0, maxPre);
+}
+
 double Exporter::effectiveCrossfade(const QVector<Segment> &segments, double wanted)
 {
 	if (segments.size() < 2 || wanted <= 0.04)
@@ -87,8 +93,12 @@ QString Exporter::buildFilter(const QVector<Segment> &segs, const QVector<Overla
 
 	for (int i = 0; i < n; ++i) {
 		const QString L = fmt(segs[i].length());
+		const QString P = fmt(preRoll(segs[i], s.preRoll));
+		// 조금 앞부터 읽은 뒤 시각 그대로 잘라 냄 (첫 장면 시각으로 0을 맞추면 .ts 처럼 찾아가기가 부정확한 영상에서
+		// 앞쪽 장면이 빠진 만큼 그림이 소리보다 빨라짐). 그림·소리 모두 같은 시각 기준
 		// 길이를 프레임 단위로 정확히 맞추고(모자라면 마지막 장면 유지), 16:9 캔버스 가운데에 맞춤
-		parts << QString("[%1:v]setpts=PTS-STARTPTS,fps=%2,tpad=stop_mode=clone:stop_duration=2,trim=duration=%3,"
+		parts << QString("[%1:v]trim=start=" + P + ",setpts=PTS-" + P + "/TB,fps=%2:start_time=0,"
+				 "tpad=stop_mode=clone:stop_duration=2,trim=duration=%3,"
 				 "setpts=PTS-STARTPTS,scale=%4:%5:force_original_aspect_ratio=decrease:flags=bicubic,"
 				 "pad=%4:%5:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v%1]")
 				 .arg(i)
@@ -96,7 +106,7 @@ QString Exporter::buildFilter(const QVector<Segment> &segs, const QVector<Overla
 				 .arg(W)
 				 .arg(H);
 		if (info.hasAudio)
-			parts << QString("[%1:a]asetpts=PTS-STARTPTS,aresample=48000:async=1,"
+			parts << QString("[%1:a]atrim=start=" + P + ",asetpts=PTS-" + P + "/TB,aresample=48000:async=1:first_pts=0,"
 					 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
 					 "apad=whole_dur=%2,atrim=duration=%2,asetpts=PTS-STARTPTS[a%1]")
 					 .arg(i)
@@ -244,6 +254,7 @@ void Exporter::start(const QString &input, const VideoInfo &info, const QVector<
 			m_segs.push_back(seg);
 	m_set = s;
 	m_set.outPath = QFileInfo(s.outPath).absoluteFilePath();
+	m_set.preRoll = std::max(3.0, seekPreRoll(m_input));
 	if (m_segs.isEmpty()) {
 		emit finished(false, "내보낼 클립이 없어요");
 		return;
@@ -313,7 +324,8 @@ void Exporter::run(const QString &encoder)
 	QStringList args{"-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats"};
 	for (const Segment &seg : m_segs) {
 		// 앞뒤로 조금 넉넉히 읽고 필터에서 정확히 자름
-		args << "-ss" << fmt(seg.start) << "-t" << fmt(seg.length() + 1.0) << inputArgs(m_input);
+		const double pre = preRoll(seg, m_set.preRoll);
+		args << "-ss" << fmt(seg.start - pre) << "-t" << fmt(seg.length() + pre + 1.0) << inputArgs(m_input);
 	}
 	args << overlayArgs;
 	if (ffmpegHasNewScriptOption())
