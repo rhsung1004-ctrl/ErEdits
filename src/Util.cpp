@@ -125,11 +125,21 @@ static VideoInfo probeOne(const QString &path)
 		}
 		static const QRegularExpression reFps(R"(([\d.]+)\s*fps)");
 		static const QRegularExpression reTbr(R"(([\d.]+)\s*tbr)");
-		auto mf = reFps.match(line);
-		if (!mf.hasMatch())
-			mf = reTbr.match(line);
-		if (mf.hasMatch())
-			info.fps = mf.captured(1).toDouble();
+		// 방송 녹화는 프레임이 빠져 평균(fps)이 56.9 처럼 나오기도 함 → 그럴 땐 원래 속도(tbr)를 씀
+		const auto mf = reFps.match(line), mt = reTbr.match(line);
+		const double f = mf.hasMatch() ? mf.captured(1).toDouble() : 0;
+		const double r = mt.hasMatch() ? mt.captured(1).toDouble() : 0;
+		if (f > 0 && r > 0 && r <= 120 && std::abs(f - r) / r > 0.02)
+			info.fps = r;
+		else if (f > 0)
+			info.fps = f;
+		else if (r > 0)
+			info.fps = r;
+		for (double std : {23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0, 120.0})
+			if (info.fps > 0 && std::abs(info.fps - std) / std < 0.015 && std::abs(info.fps - std) > 1e-3) {
+				info.fps = std;
+				break;
+			}
 	}
 	info.hasAudio = text.contains(QRegularExpression(R"(Stream #[^\n]*Audio:)"));
 	info.ok = info.width > 0 && info.height > 0 && info.duration > 0;
