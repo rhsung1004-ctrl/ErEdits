@@ -65,16 +65,26 @@ void FrameGrabber::next()
 		return;
 	}
 	QStringList args{"-hide_banner", "-nostdin", "-loglevel", "error"};
-	for (int i : m_batch)
-		args << "-ss" << num(std::max(0.0, m_times[i])) << "-t" << "0.5" << inputArgs(m_path);
+	// .ts 등은 몇 초 앞부터 읽어 그 시각 장면을 정확히 꺼냄 (그냥 찾아가면 다음 키프레임 장면이 나옴)
+	const double preMax = seekPreRoll(m_path);
+	QVector<double> pre;
+	for (int i : m_batch) {
+		const double t = std::max(0.0, m_times[i]);
+		const double p = std::min(t, preMax);
+		pre.push_back(p);
+		args << "-ss" << num(t - p) << "-t" << num(p + 0.5) << inputArgs(m_path);
+	}
 	// 장면마다 첫 한 장만 → 위아래로 쌓아 키 큰 그림 한 장으로 (concat 은 4장 이상에서 빠지는 일이 있어 vstack)
-	const QString chain = m_vf + ",trim=end_frame=1,setpts=0,setsar=1,format=rgb24";
+	auto chain = [&](int k) {
+		const QString head = pre[k] > 0 ? QString("trim=start=%1,").arg(num(pre[k])) : QString();
+		return head + m_vf + ",trim=end_frame=1,setpts=0,setsar=1,format=rgb24";
+	};
 	QString fc;
 	if (m_batch.size() == 1) {
-		fc = "[0:v]" + chain + "[out]";
+		fc = "[0:v]" + chain(0) + "[out]";
 	} else {
 		for (int k = 0; k < m_batch.size(); ++k)
-			fc += QString("[%1:v]%2[v%1];").arg(k).arg(chain);
+			fc += QString("[%1:v]%2[v%1];").arg(k).arg(chain(k));
 		for (int k = 0; k < m_batch.size(); ++k)
 			fc += QString("[v%1]").arg(k);
 		fc += QString("vstack=inputs=%1[out]").arg(m_batch.size());

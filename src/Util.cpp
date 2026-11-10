@@ -2,14 +2,18 @@
 
 #include "HudKillWatcher.h"
 
+#include <algorithm>
+
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QTextStream>
 #include <QFileInfo>
+#include <QHash>
 #include <QProcess>
 #include <QRegularExpression>
 
@@ -122,11 +126,27 @@ static VideoInfo probeOne(const QString &path)
 		}
 		static const QRegularExpression reFps(R"(([\d.]+)\s*fps)");
 		static const QRegularExpression reTbr(R"(([\d.]+)\s*tbr)");
-		auto mf = reFps.match(line);
-		if (!mf.hasMatch())
-			mf = reTbr.match(line);
-		if (mf.hasMatch())
-			info.fps = mf.captured(1).toDouble();
+		// 방송 녹화는 프레임이 빠져 평균(fps)이 56.9 처럼 나오기도 함 → 그럴 땐 원래 속도(tbr)를 씀
+		const auto mf = reFps.match(line), mt = reTbr.match(line);
+		const double f = mf.hasMatch() ? mf.captured(1).toDouble() : 0;
+		const double r = mt.hasMatch() ? mt.captured(1).toDouble() : 0;
+		if (f > 0 && r > 0 && r <= 120 && std::abs(f - r) / r > 0.02)
+			info.fps = r;
+		else if (f > 0)
+			info.fps = f;
+		else if (r > 0)
+			info.fps = r;
+		// 가장 가까운 표준 속도로 (1.5% 안일 때만)
+		double best = 0, bestErr = 0.015;
+		for (double std : {23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0, 120.0}) {
+			const double err = std::abs(info.fps - std) / std;
+			if (err < bestErr) {
+				best = std;
+				bestErr = err;
+			}
+		}
+		if (best > 0)
+			info.fps = best;
 	}
 	info.hasAudio = text.contains(QRegularExpression(R"(Stream #[^\n]*Audio:)"));
 	info.ok = info.width > 0 && info.height > 0 && info.duration > 0;
@@ -274,6 +294,70 @@ QStringList inputArgs(const QString &path)
 	if (isJoined(path))
 		return {"-f", "concat", "-safe", "0", "-i", path};
 	return {"-i", path};
+}
+
+static bool inaccurateSeek(const QString &file)
+{
+	static const QStringList ext{"ts", "m2ts", "mts", "m2t", "tp", "trp", "flv", "mpg", "mpeg", "vob"};
+	return ext.contains(QFileInfo(file).suffix().toLower());
+}
+
+double seekPreRoll(const QString &path)
+{
+	static QHash<QString, double> cache;
+	auto it = cache.constFind(path);
+	if (it != cache.constEnd())
+		return *it;
+	QString probe;
+	if (isJoined(path)) {
+		for (const JoinedPart &p : readJoined(path))
+			if (probe.isEmpty() && inaccurateSeek(p.file))
+				probe = p.file;
+	} else if (inaccurateSeek(path)) {
+		probe = path;
+	}
+	double v = 0;
+	if (!probe.isEmpty()) {
+		// 앞 60초의 키프레임 간격을 재서 가장 긴 간격 + 0.5초 (키프레임만 풀어서 빠름)
+		v = 3.0;
+		QProcess p;
+		setQuietProcess(p, false);
+		p.start(ffmpegPath(), {"-hide_banner", "-nostdin", "-skip_frame", "nokey", "-t", "60", "-i", probe, "-map", "0:v:0",
+				       "-vf", "showinfo", "-f", "null", "-"});
+		if (p.waitForFinished(30000)) {
+			static const QRegularExpression re(R"(pts_time:\s*([0-9.]+))");
+			auto it = re.globalMatch(QString::fromUtf8(p.readAllStandardError()));
+			double last = -1, gap = 0;
+			int n = 0;
+			while (it.hasNext()) {
+				const double t = it.next().captured(1).toDouble();
+				if (last >= 0)
+					gap = std::max(gap, t - last);
+				last = t;
+				++n;
+			}
+			if (n >= 3)
+				v = std::clamp(gap + 0.5, 1.0, 12.0);
+		} else {
+			p.kill();
+			p.waitForFinished(2000);
+		}
+	}
+	cache.insert(path, v);
+	return v;
+}
+
+QString scanCachePath(const QString &video)
+{
+	if (video.isEmpty())
+		return {};
+	const QFileInfo fi(video);
+	const QByteArray key = (fi.absoluteFilePath() + "|" + QString::number(fi.size()) + "|" +
+				QString::number(fi.lastModified().toSecsSinceEpoch()))
+				       .toUtf8();
+	const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/scans";
+	QDir().mkpath(dir);
+	return dir + "/" + QCryptographicHash::hash(key, QCryptographicHash::Sha1).toHex().left(20) + ".json";
 }
 
 QString displayName(const QString &path)

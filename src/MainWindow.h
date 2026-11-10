@@ -28,6 +28,9 @@ class AiPanel;
 class JoinedPlayer;
 class Thumbs;
 class TimelineBar;
+class VodList;
+class QTimer;
+struct ProjectData;
 
 class MainWindow : public QMainWindow {
 	Q_OBJECT
@@ -35,7 +38,13 @@ public:
 	explicit MainWindow(QWidget *parent = nullptr);
 	~MainWindow() override;
 	void openVideo(const QString &path);
-	void openFiles(QStringList files); // 하나면 그대로, 여러 개면 순서를 정해 묶어서
+	void openFiles(QStringList files); // 하나면 그대로, 여러 개면 순서를 정해 묶어서 (.erkc 면 프로젝트)
+	// 프로젝트 (.erkc): 방송 목록 + 방송마다 분석·편집 결과
+	void openProject(const QString &file, bool interactive = true);
+	bool saveProject(bool saveAs);
+	void newProject();
+	// 시작할 때: 마지막 프로젝트, 없으면 마지막 작업 기록을 다시 엶
+	void restoreLastSession();
 
 protected:
 	void dragEnterEvent(QDragEnterEvent *e) override;
@@ -49,6 +58,21 @@ private:
 	void startScan();
 	void onScanFinished(bool ok, const QString &msg);
 	void startVerify();
+	// 여러 방송: 분석이 (등수 읽기까지) 끝났을 때 → 모두 킬 찾기 중이면 다음 방송
+	void analysisDone();
+	void batchNext();
+	void stopBatch(const QString &why);
+	void addVods();
+	void switchVod(const QString &path);
+	void exportCombined();
+	ExportSettings exportSettings() const;
+	bool anyBusy() const;
+	struct ProjectData collectProject() const;
+	void writeAutoSave();
+	void updateProjectLabel(const QString &note = QString());
+	// 이 영상의 저장된 작업이 없을 때: 같은 이름 영상으로 하던 작업을 찾아 불러올지 물음 (영상을 옮기거나 다시 받은 경우)
+	bool tryRecoverCache(const QString &path, double duration);
+	static QString sessionFile();
 	void rebuildSegments(bool force);
 	void refreshTable();
 	void refreshSummary();
@@ -112,6 +136,14 @@ private:
 	KillScanner *m_scanner;
 	RankReader *m_rankReader;
 	KillVerifier *m_verifier;
+	VodList *m_vodList = nullptr;
+	QString m_projectPath;     // 비어 있으면 아직 저장 안 한 프로젝트
+	QLabel *m_projectLabel = nullptr;
+	QTimer *m_autoSave = nullptr;
+	bool m_restoring = false;  // 프로젝트를 여는 중 (자동 저장·이전 작업 찾기 안 함)
+	bool m_batch = false;      // 모두 킬 찾기 중
+	bool m_noAsk = false;      // 다시 분석 확인을 묻지 않음 (모두 킬 찾기)
+	QStringList m_batchTried;
 	Thumbs *m_thumbs;
 	AiPanel *m_aiPanel = nullptr;
 	QVector<QVector<Segment>> m_undo, m_redo;

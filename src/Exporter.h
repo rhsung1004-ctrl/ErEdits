@@ -22,9 +22,19 @@ struct ExportSettings {
 	QString outPath;
 };
 
+// 합쳐 내보낼 방송 하나 (방송 순서대로 클립을 이어 붙임)
+struct ExportSource {
+	QString path;
+	VideoInfo info;
+	QVector<Segment> segments;
+	QVector<Subtitle> subtitles;
+};
+
 // 고른 구간들을 원본에서 잘라 16:9 한 편으로 합침 (ffmpeg 한 번)
+//  - 여러 방송의 클립도 방송 순서대로 한 편으로 (startMulti)
 //  - 구간마다 -ss 로 바로 찾아가서 읽으므로 몇 시간짜리 원본도 앞부분을 다 풀지 않음
-//  - 클립 사이: xfade(영상) + acrossfade(소리), 처음/끝: fade + afade
+//  - 클립 사이: 겹치는 짧은 두 조각만 xfade(영상) + acrossfade(소리)로 섞고 모든 조각을 차례로 이어 붙임
+//  - 처음/끝: fade + afade
 class Exporter : public QObject {
 	Q_OBJECT
 public:
@@ -33,10 +43,26 @@ public:
 
 	void start(const QString &input, const VideoInfo &info, const QVector<Segment> &segments,
 		   const QVector<Subtitle> &subtitles, const ExportSettings &s);
+	void startMulti(const QVector<ExportSource> &sources, const ExportSettings &s);
 	void cancel();
 	bool isRunning() const { return m_proc.state() != QProcess::NotRunning; }
 
 	// 실제로 쓰일 크로스페이드 길이 (가장 짧은 클립의 절반을 넘지 않게)
+	// 원본에서 읽을 조각: 클립 몸통, 크로스페이드로 겹치는 앞 클립 끝(Tail)·다음 클립 처음(Head)
+	struct Input {
+		enum Kind { Body, Tail, Head };
+		double start = 0;  // 원본 시각
+		qint64 frames = 0; // 길이 (프레임)
+		Kind kind = Body;
+		int source = 0;    // 몇 번째 방송
+	};
+	struct SourceMeta {
+		QString path;
+		bool hasAudio = true;
+		double preRoll = 3.0; // 앞에서 미리 읽는 최대 시간
+	};
+	static QVector<Input> inputs(const QVector<Segment> &segments, double crossfade, double fps);
+	static double frameCrossfade(const QVector<Segment> &segments, double wanted, double fps);
 	static double effectiveCrossfade(const QVector<Segment> &segments, double wanted);
 	// 결과 영상 길이
 	static double outputLength(const QVector<Segment> &segments, double crossfade);
@@ -50,7 +76,7 @@ public:
 	};
 	// ffmpeg 필터 그래프 (테스트용으로 공개)
 	static QString buildFilter(const QVector<Segment> &segments, const QVector<Overlay> &overlays,
-				   const VideoInfo &info, const ExportSettings &s, int outW, int outH, double fps,
+				   const QVector<SourceMeta> &sources, const ExportSettings &s, int outW, int outH, double fps,
 				   double *totalOut);
 	QString lastFilter() const { return m_lastFilter; }
 
@@ -67,10 +93,11 @@ private:
 
 	QProcess m_proc;
 	std::unique_ptr<QTemporaryFile> m_script;
-	QString m_input;
-	VideoInfo m_info;
-	QVector<Segment> m_segs;
-	QVector<Subtitle> m_subs;
+	QVector<SourceMeta> m_sources;
+	VideoInfo m_info; // 첫 방송 (결과 크기·프레임 속도 기준)
+	QVector<Segment> m_segs; // 방송 순서 → 시간 순
+	QVector<QVector<Subtitle>> m_subs; // 방송마다
+	QString m_input; // 첫 방송 (원본에 덮어쓰기 막기)
 	std::unique_ptr<QTemporaryDir> m_tmp;
 	ExportSettings m_set;
 	QString m_encoder;
