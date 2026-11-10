@@ -232,6 +232,34 @@ void VodList::save()
 		out << QString("%1|%2").arg(m_list->item(i)->checkState() == Qt::Checked ? 1 : 0).arg(
 			       m_list->item(i)->data(Qt::UserRole).toString());
 	QSettings().setValue("vodList", out);
+	emit changed();
+}
+
+bool VodList::isChecked(const QString &path) const
+{
+	QListWidgetItem *it = itemFor(path);
+	return it && it->checkState() == Qt::Checked;
+}
+
+void VodList::setEntries(const QVector<QPair<QString, bool>> &entries)
+{
+	m_loading = true;
+	m_list->clear();
+	m_status.clear();
+	for (const auto &e : entries) {
+		if (e.first.isEmpty() || itemFor(e.first))
+			continue;
+		auto *it = new QListWidgetItem;
+		it->setData(Qt::UserRole, e.first);
+		it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
+		it->setCheckState(e.second ? Qt::Checked : Qt::Unchecked);
+		m_list->addItem(it);
+	}
+	m_loading = false;
+	for (int i = 0; i < m_list->count(); ++i)
+		updateItem(m_list->item(i), true);
+	save();
+	updateButtons();
 }
 
 void VodList::updateButtons()

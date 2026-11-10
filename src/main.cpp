@@ -23,7 +23,9 @@ int main(int argc, char *argv[])
 	w.show();
 	const QStringList args = app.arguments();
 	if (args.size() > 1)
-		w.openFiles(args.mid(1)); // 영상 파일을 exe 위에 끌어 놓아도 열림 (여러 개면 묶기)
+		w.openFiles(args.mid(1)); // 영상·프로젝트 파일을 exe 위에 끌어 놓아도 열림 (여러 개면 묶기)
+	else if (!qEnvironmentVariableIsSet("ERKILLCUT_NO_RESTORE"))
+		QTimer::singleShot(0, &w, [&w] { w.restoreLastSession(); }); // 지난 작업 이어서
 	// 개발용: 화면 모양 확인 (ERKILLCUT_SNAPSHOT=파일.png 이면 3초 뒤 창을 저장하고 종료)
 	const QString snap = qEnvironmentVariable("ERKILLCUT_SNAPSHOT");
 	// 개발용: ERKILLCUT_TEST_BATCH 이면 시작하자마자 [모두 킬 찾기]

@@ -8,6 +8,7 @@
 #include "SubtitlePanel.h"
 #include "TimelineBar.h"
 #include "VideoView.h"
+#include "Project.h"
 #include "VodList.h"
 
 #include <QApplication>
@@ -35,6 +36,8 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QMediaPlayer>
+#include <QLocale>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QProgressBar>
@@ -51,6 +54,7 @@
 #include <QTabWidget>
 #include <QTextStream>
 #include <QRegularExpression>
+#include <QTime>
 #include <QTimer>
 
 #include <algorithm>
@@ -210,6 +214,35 @@ void MainWindow::buildUi()
 	auto *top = new QHBoxLayout;
 	top->addWidget(btnOpen);
 	top->addWidget(m_fileLabel, 1);
+	// 프로젝트
+	auto *btnProj = new QPushButton("📁 프로젝트");
+	btnProj->setToolTip("프로젝트 파일(.erkc)에 방송 목록과 방송마다 분석·편집한 내용을 모두 저장해요.\n"
+			    "저장해 두면 그 뒤로는 바꿀 때마다 자동으로 저장돼요.");
+	auto *projMenu = new QMenu(btnProj);
+	projMenu->addAction("새 프로젝트…", this, &MainWindow::newProject);
+	projMenu->addAction("프로젝트 열기…", QKeySequence::Open, this, [this] {
+		const QString f = QFileDialog::getOpenFileName(this, "프로젝트 열기", QSettings().value("projectDir").toString(),
+							       "ERKillCut 프로젝트 (*.erkc)");
+		if (!f.isEmpty())
+			openProject(f);
+	});
+	projMenu->addSeparator();
+	projMenu->addAction("저장", QKeySequence::Save, this, [this] { saveProject(false); });
+	projMenu->addAction("다른 이름으로 저장…", QKeySequence::SaveAs, this, [this] { saveProject(true); });
+	btnProj->setMenu(projMenu);
+	addActions(projMenu->actions()); // 메뉴를 열지 않아도 Ctrl+S·Ctrl+O
+	auto *btnSave = new QPushButton("💾 저장");
+	btnSave->setToolTip("프로젝트 저장 (Ctrl+S)");
+	connect(btnSave, &QPushButton::clicked, this, [this] { saveProject(false); });
+	m_projectLabel = new QLabel;
+	m_projectLabel->setStyleSheet("color:#888;");
+	top->addWidget(m_projectLabel);
+	top->addWidget(btnProj);
+	top->addWidget(btnSave);
+	m_autoSave = new QTimer(this);
+	m_autoSave->setSingleShot(true);
+	m_autoSave->setInterval(1500);
+	connect(m_autoSave, &QTimer::timeout, this, &MainWindow::writeAutoSave);
 
 	auto *ctrl = new QHBoxLayout;
 	ctrl->addWidget(m_btnPlay);
@@ -560,6 +593,10 @@ void MainWindow::buildUi()
 		setBusy(false, false);
 	});
 	connect(m_vodList, &VodList::combineRequested, this, &MainWindow::exportCombined);
+	connect(m_vodList, &VodList::changed, this, [this] {
+		if (!m_restoring)
+			m_autoSave->start();
+	});
 	rl->addWidget(exportBar);
 	right->setMinimumWidth(520);
 
@@ -759,6 +796,11 @@ void MainWindow::openFiles(QStringList files)
 {
 	if (files.isEmpty())
 		return;
+	for (const QString &f : files)
+		if (f.endsWith("." + QString(kProjectSuffix), Qt::CaseInsensitive)) {
+			openProject(f);
+			return;
+		}
 	if (files.size() == 1) {
 		openVideo(files.first());
 		return;
@@ -881,7 +923,12 @@ void MainWindow::openVideo(const QString &path)
 	m_player->setSource(QUrl::fromLocalFile(path));
 	m_player->pause();
 
-	const bool cached = loadCache();
+	bool cached = loadCache();
+	bool recovered = false;
+	if (!cached && tryRecoverCache(path, info.duration)) {
+		cached = loadCache();
+		recovered = cached;
+	}
 	rebuildGames(false); // 저장된 클립은 그대로 (판 목록만 다시 계산)
 	m_aiPanel->setVideo(path, info.duration, info.hasAudio, cachePath().replace(".json", ".ai.json"));
 	if (cached) {
@@ -889,6 +936,8 @@ void MainWindow::openVideo(const QString &path)
 					      .arg(std::count_if(m_events.begin(), m_events.end(),
 								 [](const KillEvent &e) { return e.kill; }))
 					      .arg(m_scanComplete ? "" : ", 중간까지만 분석됨"));
+		if (recovered)
+			m_scanStatus->setText("<b>이전에 편집하던 작업을 불러왔어요.</b> " + m_scanStatus->text());
 		m_timeline->setScanned(m_scannedUntil);
 		if (m_info.duration > 0)
 			m_scanProgress->setValue(int(std::clamp(m_scannedUntil / m_info.duration, 0.0, 1.0) * 1000));
@@ -930,6 +979,8 @@ void MainWindow::closeEvent(QCloseEvent *e)
 	m_rankReader->cancel();
 	m_exporter->cancel();
 	saveCache();
+	m_autoSave->stop();
+	writeAutoSave();
 	e->accept();
 }
 
@@ -1336,12 +1387,13 @@ void MainWindow::saveCache()
 	o["rankReadings"] = readingsToJson(m_readings);
 	o["ranksRead"] = m_readsDone;
 	o["gameEdits"] = gameEditsToJson(m_games);
-	QFile f(cachePath());
-	if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
-		f.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
-	f.close();
+	o["duration"] = m_info.duration;
+	o["savedAt"] = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
+	writeJsonFile(cachePath(), o); // 중간에 꺼져도 앞 내용이 남게
 	if (m_vodList)
 		m_vodList->refreshStatus(m_path);
+	if (m_autoSave && !m_restoring)
+		m_autoSave->start();
 }
 
 bool MainWindow::loadCache()
@@ -1958,4 +2010,290 @@ void MainWindow::exportCombined()
 	m_exportStatus->setText(QString("합쳐서 내보내는 중… (방송 %1개, 클립 %2개)").arg(sources.size()).arg(clips));
 	setBusy(false, true);
 	m_exporter->startMulti(sources, s);
+}
+
+// ───────────────────────── 프로젝트 ─────────────────────────
+
+QString MainWindow::sessionFile()
+{
+	return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/last_session.erkc";
+}
+
+ProjectData MainWindow::collectProject() const
+{
+	ProjectData d;
+	const QStringList paths = m_vodList->paths();
+	for (int i = 0; i < paths.size(); ++i) {
+		const QString &p = paths[i];
+		ProjectVod v;
+		v.path = p;
+		if (isJoined(p))
+			for (const JoinedPart &part : readJoined(p))
+				v.parts << part.file;
+		v.checked = m_vodList->isChecked(p);
+		const QString c = scanCachePath(p);
+		v.cache = readJsonFile(c);
+		v.ai = readJsonFile(QString(c).replace(".json", ".ai.json"));
+		v.duration = p == m_path ? m_info.duration : v.cache["duration"].toDouble();
+		if (p == m_path)
+			d.current = i;
+		d.vods.push_back(v);
+	}
+	QJsonObject ex;
+	ex["height"] = m_res->currentData().toInt();
+	ex["fps"] = m_fps->currentData().toDouble();
+	ex["crossfade"] = m_xfade->value();
+	ex["fadeIn"] = m_fadeIn->value();
+	ex["fadeOut"] = m_fadeOut->value();
+	ex["cpuOnly"] = m_cpuOnly->isChecked();
+	ex["normalizeAudio"] = m_loudnorm->isChecked();
+	d.exportSettings = ex;
+	return d;
+}
+
+void MainWindow::writeAutoSave()
+{
+	if (m_restoring || m_vodList->paths().isEmpty())
+		return;
+	const ProjectData d = collectProject();
+	QString err;
+	saveProjectFile(sessionFile(), d, &err); // 프로젝트를 저장하지 않았어도 마지막 작업은 남김
+	if (!m_projectPath.isEmpty()) {
+		if (saveProjectFile(m_projectPath, d, &err))
+			updateProjectLabel("자동 저장 " + QTime::currentTime().toString("HH:mm"));
+		else
+			updateProjectLabel("<span style='color:#e66'>자동 저장 실패</span>");
+	}
+}
+
+void MainWindow::updateProjectLabel(const QString &note)
+{
+	if (m_projectPath.isEmpty()) {
+		m_projectLabel->setText("프로젝트 저장 안 함");
+		m_projectLabel->setToolTip("💾 저장으로 프로젝트 파일을 만들어 두면 바꿀 때마다 자동으로 저장돼요.\n"
+					   "(저장하지 않아도 마지막 작업은 프로그램을 다시 켤 때 이어서 열려요)");
+		return;
+	}
+	m_projectLabel->setText(QString("<b>%1</b>%2")
+					.arg(QFileInfo(m_projectPath).completeBaseName().toHtmlEscaped(),
+					     note.isEmpty() ? QString() : " · " + note));
+	m_projectLabel->setToolTip(QDir::toNativeSeparators(m_projectPath));
+	setWindowTitle(QFileInfo(m_projectPath).completeBaseName() + " — ERKillCut");
+}
+
+bool MainWindow::saveProject(bool saveAs)
+{
+	saveCache();
+	if (m_vodList->paths().isEmpty()) {
+		QMessageBox::information(this, "프로젝트 저장", "먼저 방송 다시보기를 열어 주세요.");
+		return false;
+	}
+	QString file = m_projectPath;
+	if (file.isEmpty() || saveAs) {
+		QSettings st;
+		const QString first = m_vodList->paths().first();
+		QString base = isJoined(first) ? displayName(first) : QFileInfo(first).completeBaseName();
+		base.replace(QRegularExpression(R"([\\/:*?"<>|])"), "_");
+		const QString dir = st.value("projectDir", isJoined(first) ? QString() : QFileInfo(first).absolutePath()).toString();
+		file = QFileDialog::getSaveFileName(this, "프로젝트 저장", QDir(dir).filePath(base + ".erkc"),
+						    "ERKillCut 프로젝트 (*.erkc)");
+		if (file.isEmpty())
+			return false;
+		if (!file.endsWith(".erkc", Qt::CaseInsensitive))
+			file += ".erkc";
+		st.setValue("projectDir", QFileInfo(file).absolutePath());
+	}
+	QString err;
+	if (!saveProjectFile(file, collectProject(), &err)) {
+		QMessageBox::warning(this, "프로젝트 저장", "저장하지 못했어요: " + err);
+		return false;
+	}
+	m_projectPath = file;
+	QSettings().setValue("lastProject", file);
+	updateProjectLabel("저장함 " + QTime::currentTime().toString("HH:mm"));
+	return true;
+}
+
+void MainWindow::newProject()
+{
+	if (anyBusy()) {
+		QMessageBox::information(this, "작업 중", "분석이나 내보내기가 끝난 뒤에 할 수 있어요.");
+		return;
+	}
+	saveCache();
+	m_autoSave->stop();
+	writeAutoSave();
+	m_projectPath.clear();
+	QSettings().remove("lastProject");
+	setWindowTitle("ERKillCut — 이터널리턴 킬 하이라이트 자동 컷 편집");
+	m_restoring = true;
+	m_vodList->setEntries({});
+	m_restoring = false;
+	updateProjectLabel();
+	chooseVideo();
+	if (m_vodList->paths().isEmpty() && !m_path.isEmpty())
+		m_vodList->addPath(m_path); // 열지 않았으면 지금 영상만 남김
+}
+
+void MainWindow::openProject(const QString &file, bool interactive)
+{
+	if (anyBusy()) {
+		QMessageBox::information(this, "작업 중", "분석이나 내보내기가 끝난 뒤에 프로젝트를 열 수 있어요.");
+		return;
+	}
+	ProjectData d;
+	QString err;
+	if (!loadProjectFile(file, &d, &err)) {
+		if (interactive)
+			QMessageBox::warning(this, "프로젝트 열기", err);
+		return;
+	}
+	saveCache();
+	auto locate = [&](const QString &orig) -> QString {
+		if (QFileInfo::exists(orig))
+			return orig;
+		if (!interactive)
+			return {};
+		if (QMessageBox::question(this, "영상을 찾을 수 없음",
+					  QString("이 영상을 찾을 수 없어요:\n%1\n\n옮긴 곳에서 직접 찾을까요? (아니요: 이 방송은 빼고 열기)")
+						  .arg(QDir::toNativeSeparators(orig))) != QMessageBox::Yes)
+			return {};
+		return QFileDialog::getOpenFileName(this, "찾기: " + QFileInfo(orig).fileName(),
+						    QFileInfo(file).absolutePath(),
+						    QString("%1;;영상 (*.mp4 *.mkv *.ts *.flv *.mov *.webm *.m4v *.avi);;모든 파일 (*)")
+							    .arg(QFileInfo(orig).fileName()));
+	};
+	QVector<QPair<QString, bool>> entries;
+	QStringList missing;
+	QString current;
+	for (int i = 0; i < d.vods.size(); ++i) {
+		const ProjectVod &v = d.vods[i];
+		QString path;
+		if (!v.parts.isEmpty()) {
+			QStringList parts;
+			for (const QString &p : v.parts) {
+				const QString r = locate(p);
+				if (r.isEmpty()) {
+					parts.clear();
+					break;
+				}
+				parts << r;
+			}
+			QString e;
+			if (!parts.isEmpty())
+				path = makeJoined(parts, &e);
+			if (path.isEmpty()) {
+				missing << QFileInfo(v.parts.value(0)).fileName() + QString(" 외 %1개").arg(v.parts.size() - 1);
+				continue;
+			}
+		} else {
+			path = locate(v.path);
+			if (path.isEmpty()) {
+				missing << QFileInfo(v.path).fileName();
+				continue;
+			}
+		}
+		// 프로젝트에 저장된 작업을 이 영상 자리로 (거기 있는 게 더 최근이면 그대로 둠)
+		if (!v.cache.isEmpty()) {
+			const QString c = scanCachePath(path);
+			const QJsonObject cur = readJsonFile(c);
+			if (cur.isEmpty() || cur["savedAt"].toString() <= v.cache["savedAt"].toString()) {
+				QJsonObject o = v.cache;
+				o["video"] = path;
+				writeJsonFile(c, o);
+				if (!v.ai.isEmpty())
+					writeJsonFile(QString(c).replace(".json", ".ai.json"), v.ai);
+			}
+		}
+		entries.push_back({path, v.checked});
+		if (i == d.current)
+			current = path;
+	}
+	// 내보내기 설정
+	const QJsonObject ex = d.exportSettings;
+	if (!ex.isEmpty()) {
+		if (int k = m_res->findData(ex["height"].toInt()); k >= 0)
+			m_res->setCurrentIndex(k);
+		if (int k = m_fps->findData(ex["fps"].toDouble()); k >= 0)
+			m_fps->setCurrentIndex(k);
+		m_xfade->setValue(ex["crossfade"].toDouble(m_xfade->value()));
+		m_fadeIn->setValue(ex["fadeIn"].toDouble(m_fadeIn->value()));
+		m_fadeOut->setValue(ex["fadeOut"].toDouble(m_fadeOut->value()));
+		m_cpuOnly->setChecked(ex["cpuOnly"].toBool(m_cpuOnly->isChecked()));
+		m_loudnorm->setChecked(ex["normalizeAudio"].toBool(m_loudnorm->isChecked()));
+	}
+	const bool isSession = QFileInfo(file).absoluteFilePath() == QFileInfo(sessionFile()).absoluteFilePath();
+	m_restoring = true;
+	m_vodList->setEntries(entries);
+	if (current.isEmpty() && !entries.isEmpty())
+		current = entries.first().first;
+	if (!current.isEmpty()) {
+		m_path.clear(); // 같은 영상이어도 다시 읽음
+		openVideo(current);
+	}
+	m_restoring = false;
+	m_projectPath = isSession ? QString() : QFileInfo(file).absoluteFilePath();
+	if (!isSession) {
+		QSettings().setValue("lastProject", m_projectPath);
+		QSettings().setValue("projectDir", QFileInfo(file).absolutePath());
+	}
+	updateProjectLabel(isSession ? QString() : "열었음");
+	if (isSession && !entries.isEmpty())
+		m_scanStatus->setText("<b>지난번 작업을 이어서 열었어요.</b> " + m_scanStatus->text());
+	if (!missing.isEmpty()) {
+		const QString msg = "찾지 못해 빠진 방송:\n" + missing.join("\n");
+		if (interactive)
+			QMessageBox::information(this, "프로젝트 열기", msg);
+		else
+			m_scanStatus->setText(m_scanStatus->text() + "<br>" + msg.toHtmlEscaped().replace("\n", "<br>"));
+	}
+}
+
+void MainWindow::restoreLastSession()
+{
+	const QString last = QSettings().value("lastProject").toString();
+	if (!last.isEmpty() && QFileInfo::exists(last))
+		openProject(last, false);
+	else if (QFileInfo::exists(sessionFile()))
+		openProject(sessionFile(), false);
+	updateProjectLabel(m_projectPath.isEmpty() ? QString() : "열었음");
+}
+
+bool MainWindow::tryRecoverCache(const QString &path, double duration)
+{
+	if (m_restoring || isJoined(path))
+		return false;
+	const QString mine = scanCachePath(path);
+	const QString name = QFileInfo(path).fileName();
+	const QDir dir(QFileInfo(mine).absolutePath());
+	for (const QFileInfo &fi : dir.entryInfoList({"*.json"}, QDir::Files, QDir::Time)) { // 최근 것부터
+		if (fi.fileName().endsWith(".ai.json") || fi.absoluteFilePath() == QFileInfo(mine).absoluteFilePath())
+			continue;
+		const QJsonObject o = readJsonFile(fi.absoluteFilePath());
+		if (QFileInfo(o["video"].toString()).fileName().compare(name, Qt::CaseInsensitive) != 0)
+			continue;
+		const QVector<Segment> segs = segmentsFromJson(o["segments"].toArray());
+		if (segs.isEmpty() && o["events"].toArray().isEmpty())
+			continue;
+		const double d = o["duration"].toDouble();
+		if (d > 0 && duration > 0 && std::abs(d - duration) > 5)
+			continue;
+		const int clips = int(std::count_if(segs.begin(), segs.end(), [](const Segment &s) { return s.enabled; }));
+		const QString when = QLocale().toString(fi.lastModified(), "M월 d일 HH:mm");
+		if (QMessageBox::question(this, "이전 작업 찾음",
+					  QString("이 영상(%1)으로 하던 작업을 찾았어요.\n\n원래 위치: %2\n마지막 저장: %3 · 클립 %4개%5\n\n"
+						  "영상을 옮기거나 다시 받았다면 이어서 편집할 수 있어요. 불러올까요?")
+						  .arg(name, QDir::toNativeSeparators(o["video"].toString()), when)
+						  .arg(clips)
+						  .arg(o["edited"].toBool() ? " · 직접 고친 내용 있음" : "")) != QMessageBox::Yes)
+			return false;
+		QJsonObject copy = o;
+		copy["video"] = path;
+		writeJsonFile(mine, copy);
+		const QString ai = fi.absoluteFilePath().replace(".json", ".ai.json");
+		if (QFileInfo::exists(ai))
+			writeJsonFile(QString(mine).replace(".json", ".ai.json"), readJsonFile(ai));
+		return true;
+	}
+	return false;
 }

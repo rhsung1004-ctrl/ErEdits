@@ -35,6 +35,9 @@ public:
 	void refreshAll();
 	QStringList paths() const;
 	QStringList checkedPaths() const; // 합치기에 넣을 방송 (목록 순서)
+	bool isChecked(const QString &path) const;
+	// 목록을 통째로 바꿈 (프로젝트 열기) — (경로, 체크)
+	void setEntries(const QVector<QPair<QString, bool>> &entries);
 	void setBatchRunning(bool on);
 	void setBusy(bool busy);
 
@@ -44,6 +47,7 @@ signals:
 	void analyzeAllRequested();
 	void stopRequested();
 	void combineRequested();
+	void changed(); // 넣기·빼기·순서·체크가 바뀜 (프로젝트 자동 저장)
 
 private:
 	QListWidgetItem *itemFor(const QString &path) const;
