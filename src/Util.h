@@ -55,5 +55,11 @@ QVector<JoinedPart> readJoined(const QString &path);
 QString makeJoined(const QStringList &files, QString *error);
 // ffmpeg 에 이 영상을 넣는 인자 ("-i" 경로, 묶음이면 이어 붙이기 형식으로)
 QStringList inputArgs(const QString &path);
+// 이 영상에서 한 장면을 꺼낼 때 앞에서 미리 읽을 시간 (초)
+// .ts 등은 찾아가기가 키프레임 사이에 떨어져 다음 키프레임까지(최대 몇 초) 늦은 장면이 나오므로
+//  영상의 키프레임 간격만큼 앞부터 읽음 (mp4·mkv 는 0)
+double seekPreRoll(const QString &path);
+// 영상마다 분석·편집 결과를 저장하는 파일 경로 (경로·크기·수정 시각이 같으면 같은 파일)
+QString scanCachePath(const QString &video);
 // 화면에 보일 이름 ("a.mkv" 또는 "a.mkv 외 2개")
 QString displayName(const QString &path);
